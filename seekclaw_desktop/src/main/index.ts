@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { chmodSync, existsSync, statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { basename, extname, join, resolve } from 'node:path'
 import { release } from 'node:os'
@@ -35,18 +35,32 @@ const delay = (milliseconds: number): Promise<void> =>
 function resolveRuntimeExecutable(): string | null {
   const executable = process.platform === 'win32' ? 'seekclaw.exe' : 'seekclaw'
   const configured = process.env.SEEKCLAW_RUNTIME_EXECUTABLE?.trim()
+  const platformRid = process.platform === 'win32' ? 'win-x64' : 'linux-x64'
   const candidates = [
     configured ? resolve(configured) : '',
     app.isPackaged ? join(process.resourcesPath, 'runtime', executable) : '',
+    !app.isPackaged ? resolve(app.getAppPath(), 'runtime', platformRid, executable) : '',
     !app.isPackaged ? resolve(app.getAppPath(), 'runtime', 'win-x64', executable) : '',
     !app.isPackaged
       ? resolve(app.getAppPath(), '..', 'seekclaw_cli', 'bin', 'Debug', 'net10.0', executable)
       : '',
     !app.isPackaged
+      ? resolve(app.getAppPath(), '..', 'seekclaw_cli', 'bin', 'Release', 'net10.0', platformRid, 'publish', executable)
+      : '',
+    !app.isPackaged
       ? resolve(app.getAppPath(), '..', 'seekclaw_cli', 'bin', 'Release', 'net10.0', 'win-x64', 'publish', executable)
       : ''
   ].filter(Boolean)
-  return candidates.find((candidate) => existsSync(candidate)) ?? null
+  const found = candidates.find((candidate) => existsSync(candidate)) ?? null
+  if (found && process.platform !== 'win32') {
+    try {
+      const stat = statSync(found)
+      if ((stat.mode & 0o111) === 0) {
+        chmodSync(found, 0o755)
+      }
+    } catch {}
+  }
+  return found
 }
 
 async function ensureDaemonRunning(): Promise<void> {
@@ -54,32 +68,51 @@ async function ensureDaemonRunning(): Promise<void> {
   if (existing.connected) return
 
   const executable = resolveRuntimeExecutable()
-  if (!executable)
+  if (!executable) {
     throw new Error('Bundled SeekClaw Runtime was not found. Rebuild the Desktop release package.')
+  }
 
   const child = spawn(executable, ['daemon'], {
     cwd: is.dev ? resolve(app.getAppPath(), '..') : app.getPath('userData'),
-    env: { ...process.env, SEEKCLAW_MANAGED_BY_DESKTOP: '1' },
-    stdio: 'ignore',
+    env: {
+      ...process.env,
+      SEEKCLAW_MANAGED_BY_DESKTOP: '1',
+      DOTNET_SYSTEM_GLOBALIZATION_INVARIANT: '1',
+      DOTNET_BUNDLE_EXTRACT_BASE_DIR: join(app.getPath('userData'), 'dotnet_bundle')
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true
   })
   managedDaemon = child
+
   let startupError: Error | null = null
-  child.once('error', (error) => { startupError = error })
-  child.once('exit', () => {
+  let childStderr = ''
+  child.stderr?.on('data', (chunk) => {
+    childStderr += chunk.toString()
+    if (childStderr.length > 4000) childStderr = childStderr.slice(-4000)
+  })
+  child.once('error', (error) => {
+    startupError = error
+  })
+  child.once('exit', (code) => {
     if (managedDaemon === child) managedDaemon = null
+    if (code !== 0 && code !== null) {
+      console.error(`SeekClaw Runtime exited with code ${code}. Stderr: ${childStderr}`)
+    }
   })
 
-  for (let attempt = 0; attempt < 24; attempt++) {
-    await delay(attempt === 0 ? 120 : 250)
+  for (let attempt = 0; attempt < 28; attempt++) {
+    await delay(attempt === 0 ? 150 : 250)
     if (startupError) throw startupError
-    if (child.exitCode !== null) throw new Error(`SeekClaw Runtime exited with code ${child.exitCode}.`)
+    if (child.exitCode !== null) {
+      throw new Error(`SeekClaw Runtime exited with code ${child.exitCode}: ${childStderr.trim() || 'unknown error'}`)
+    }
     const state = await daemon.connect()
     if (state.connected) return
   }
 
   if (child.exitCode === null) child.kill()
-  throw new Error('SeekClaw Runtime did not become ready in time.')
+  throw new Error(`SeekClaw Runtime did not become ready in time. ${childStderr.trim() ? 'Stderr: ' + childStderr.trim() : ''}`)
 }
 
 async function stopManagedDaemon(): Promise<void> {
@@ -144,33 +177,38 @@ function showMainWindow(): void {
 
 function createTray(): void {
   if (tray) return
-  tray = new Tray(icon)
-  tray.setToolTip('SeekClaw')
+  try {
+    tray = new Tray(icon)
+    tray.setToolTip('SeekClaw')
 
-  const contextMenu = Menu.buildFromTemplate([
-    {
-      label: '显示',
-      click: () => showMainWindow()
-    },
-    { type: 'separator' },
-    {
-      label: '退出',
-      click: () => {
-        isQuitting = true
-        app.quit()
+    const contextMenu = Menu.buildFromTemplate([
+      {
+        label: '显示',
+        click: () => showMainWindow()
+      },
+      { type: 'separator' },
+      {
+        label: '退出',
+        click: () => {
+          isQuitting = true
+          app.quit()
+        }
       }
-    }
-  ])
+    ])
 
-  tray.setContextMenu(contextMenu)
+    tray.setContextMenu(contextMenu)
 
-  tray.on('click', () => {
-    showMainWindow()
-  })
+    tray.on('click', () => {
+      showMainWindow()
+    })
 
-  tray.on('double-click', () => {
-    showMainWindow()
-  })
+    tray.on('double-click', () => {
+      showMainWindow()
+    })
+  } catch (error) {
+    console.warn('System tray initialization skipped (not supported or failed):', error)
+    tray = null
+  }
 }
 
 function showNativeNotification(title: string, body: string): void {
@@ -381,10 +419,10 @@ if (!hasSingleInstanceLock) {
   })
 
   app.whenReady().then(async () => {
+    registerIpc()
     electronApp.setAppUserModelId('com.hoilai.seekclaw')
     app.on('browser-window-created', (_, window) => optimizer.watchWindowShortcuts(window))
     createTray()
-    registerIpc()
     await ensureDaemonRunning().catch((error) => console.error('Unable to start SeekClaw Runtime:', error))
     createWindow()
     nativeTheme.on('updated', syncNativeWindowTheme)

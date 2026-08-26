@@ -6,6 +6,7 @@
     <Nullable>enable</Nullable>
     <RootNamespace>SeekClaw.Runtime</RootNamespace>
     <IsAotCompatible>true</IsAotCompatible>
+    <InvariantGlobalization>true</InvariantGlobalization>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
   </PropertyGroup>
 

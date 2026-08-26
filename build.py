@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
-"""Build a self-contained SeekClaw Runtime and Windows Desktop release with enhanced CLI UI/UX."""
+"""Build a self-contained SeekClaw Runtime and Desktop release for Windows and Linux."""
 
 from __future__ import annotations
 
 import argparse
+import gzip
+import hashlib
+import io
 import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
+import tarfile
 import time
 from pathlib import Path
 from typing import Sequence
@@ -59,7 +64,7 @@ except ImportError:  # pragma: no cover - 标准库降级，保证构建脚本�
 
     console = _Console()
 
-    def Panel(content="", title="", border_style=None):  # noqa: N802 (rich 兼容 API)
+    def Panel(content="", title="", border_style=None, **kwargs):  # noqa: N802 (rich 兼容 API)
         rendered = str(content)
         if title:
             return f"──── {title} ────\n{rendered}"
@@ -101,24 +106,645 @@ except ImportError:  # pragma: no cover - 标准库降级，保证构建脚本�
 
 REPO_ROOT = Path(__file__).resolve().parent
 DESKTOP_DIR = REPO_ROOT / "seekclaw_desktop"
-RUNTIME_STAGE = DESKTOP_DIR / "runtime" / "win-x64"
-BUILDER_OUTPUT = DESKTOP_DIR / "release"
-UNPACKED_OUTPUT = BUILDER_OUTPUT / "win-unpacked"
-PUBLISH_DIR = REPO_ROOT / "publish"
-PORTABLE_OUTPUT = PUBLISH_DIR / "SeekClaw-win-x64"
-PORTABLE_ZIP_BASE_NAME = PUBLISH_DIR / "SeekClaw-portable-win-x64"
-PORTABLE_ZIP_OUTPUT = PUBLISH_DIR / "SeekClaw-portable-win-x64.zip"
-INSTALLER_OUTPUT = PUBLISH_DIR / "SeekClaw-Setup-win-x64.exe"
 DESKTOP_PACKAGE_FILE = DESKTOP_DIR / "package.json"
+BUILDER_OUTPUT = DESKTOP_DIR / "release"
+PUBLISH_DIR = REPO_ROOT / "publish"
+ICON_PNG_PATH = DESKTOP_DIR / "resources" / "logo.png"
+
 VERSION_PATTERN = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
-PORTABLE_TARGET = "portable"
-INSTALLER_TARGET = "installer"
-BOTH_TARGET = "both"
+
+PLATFORM_WINDOWS = "windows"
+PLATFORM_LINUX = "linux"
+
+TARGET_PORTABLE = "portable"
+TARGET_INSTALLER = "installer"
+TARGET_BOTH = "both"
+TARGET_DEB = "deb"
+TARGET_RPM = "rpm"
+TARGET_ALL = "all"
 
 
 class BuildError(RuntimeError):
     """Raised when a release prerequisite or output is missing."""
 
+
+# ==============================================================================
+# RPM & DEB 打包器 (纯 Python 标准库实现，零外部依赖，跨平台生成)
+# ==============================================================================
+
+RPM_MAGIC = b"\xed\xab\xee\xdb"
+RPM_HEADER_MAGIC = b"\x8e\xad\xe8\x01\x00\x00\x00\x00"
+
+TYPE_NULL = 0
+TYPE_CHAR = 1
+TYPE_INT8 = 2
+TYPE_INT16 = 3
+TYPE_INT32 = 4
+TYPE_INT64 = 5
+TYPE_STRING = 6
+TYPE_BIN = 7
+TYPE_STRING_ARRAY = 8
+TYPE_I18NSTRING = 9
+
+
+class RpmHeaderBuilder:
+    def __init__(self):
+        self.entries = []  # list of (tag, type, value_bytes, count)
+
+    def add_string(self, tag: int, value: str):
+        val_bytes = value.encode("utf-8") + b"\x00"
+        self.entries.append((tag, TYPE_STRING, val_bytes, 1))
+
+    def add_i18n_string(self, tag: int, values: Sequence[str]):
+        val_bytes = b"".join(v.encode("utf-8") + b"\x00" for v in values)
+        self.entries.append((tag, TYPE_I18NSTRING, val_bytes, len(values)))
+
+    def add_string_array(self, tag: int, values: Sequence[str]):
+        val_bytes = b"".join(v.encode("utf-8") + b"\x00" for v in values)
+        self.entries.append((tag, TYPE_STRING_ARRAY, val_bytes, len(values)))
+
+    def add_int16_array(self, tag: int, values: Sequence[int]):
+        val_bytes = struct.pack(f">{len(values)}H", *[v & 0xFFFF for v in values])
+        self.entries.append((tag, TYPE_INT16, val_bytes, len(values)))
+
+    def add_int32_array(self, tag: int, values: Sequence[int]):
+        val_bytes = struct.pack(f">{len(values)}I", *[v & 0xFFFFFFFF for v in values])
+        self.entries.append((tag, TYPE_INT32, val_bytes, len(values)))
+
+    def add_bin(self, tag: int, data: bytes):
+        self.entries.append((tag, TYPE_BIN, data, len(data)))
+
+    def build(self) -> bytes:
+        # RPM 要求索引标签必须严格按 Tag ID 升序排列
+        self.entries.sort(key=lambda e: e[0])
+
+        index_entries = []
+        data_section = bytearray()
+
+        for tag, typ, val_bytes, count in self.entries:
+            if typ in (TYPE_INT16,) and len(data_section) % 2 != 0:
+                data_section.extend(b"\x00" * (2 - len(data_section) % 2))
+            elif typ in (TYPE_INT32, TYPE_INT64) and len(data_section) % 4 != 0:
+                data_section.extend(b"\x00" * (4 - len(data_section) % 4))
+            elif typ in (TYPE_INT64,) and len(data_section) % 8 != 0:
+                data_section.extend(b"\x00" * (8 - len(data_section) % 8))
+
+            offset = len(data_section)
+            data_section.extend(val_bytes)
+            index_entries.append((tag, typ, offset, count))
+
+        nindex = len(index_entries)
+        hsize = len(data_section)
+
+        header_bytes = bytearray(RPM_HEADER_MAGIC)
+        header_bytes[4:8] = struct.pack(">II", nindex, hsize)
+
+        for tag, typ, offset, count in index_entries:
+            header_bytes.extend(struct.pack(">IIII", tag, typ, offset, count))
+
+        header_bytes.extend(data_section)
+        return bytes(header_bytes)
+
+
+def _make_cpio_entry(path: str, data: bytes, mode: int, inode: int, mtime: int) -> bytes:
+    # SVR4 new ASCII format (070701)
+    path_bytes = path.encode("utf-8") + b"\x00"
+    namesize = len(path_bytes)
+    filesize = len(data)
+
+    header = (
+        f"070701"
+        f"{inode:08x}"
+        f"{mode:08x}"
+        f"{0:08x}"  # uid
+        f"{0:08x}"  # gid
+        f"{1:08x}"  # nlink
+        f"{mtime:08x}"
+        f"{filesize:08x}"
+        f"{3:08x}"  # maj
+        f"{1:08x}"  # min
+        f"{0:08x}"  # rmaj
+        f"{0:08x}"  # rmin
+        f"{namesize:08x}"
+        f"{0:08x}"  # check
+    ).encode("ascii")
+
+    name_padding = b"\x00" * ((4 - (len(header) + len(path_bytes)) % 4) % 4)
+    data_padding = b"\x00" * ((4 - len(data) % 4) % 4)
+    return header + path_bytes + name_padding + data + data_padding
+
+
+def create_linux_portable_tar(
+    source_dir: Path,
+    output_tar_path: Path,
+    base_folder_name: str = "SeekClaw-linux-x64",
+) -> Path:
+    """将 linux-unpacked 目录打包为标准的 .tar.gz 便携包，设置正确的 Unix 文件权限。"""
+    remove_file(output_tar_path)
+    output_tar_path.parent.mkdir(parents=True, exist_ok=True)
+    now = int(time.time())
+
+    with gzip.GzipFile(filename="", mode="wb", fileobj=open(output_tar_path, "wb"), mtime=now) as gz:
+        with tarfile.open(mode="w:", fileobj=gz) as tar:
+            for root, dirs, files in os.walk(source_dir):
+                rel_root = os.path.relpath(root, source_dir).replace("\\", "/")
+                tar_dir = f"{base_folder_name}/{rel_root}" if rel_root != "." else base_folder_name
+                dir_info = tarfile.TarInfo(name=tar_dir)
+                dir_info.type = tarfile.DIRTYPE
+                dir_info.mode = 0o755
+                dir_info.mtime = now
+                dir_info.uname = "root"
+                dir_info.gname = "root"
+                tar.addfile(dir_info)
+
+                for file in files:
+                    file_path = Path(root) / file
+                    rel_path = os.path.relpath(file_path, source_dir).replace("\\", "/")
+                    tar_file_path = f"{base_folder_name}/{rel_path}"
+                    
+                    is_executable = (
+                        file in ("seekclaw-desktop", "seekclaw", "chrome-sandbox", "chrome_crashpad_handler")
+                        or file.endswith(".so")
+                        or ("runtime" in rel_path and not file.endswith(".txt"))
+                    )
+                    mode = 0o4755 if file == "chrome-sandbox" else (0o755 if is_executable else 0o644)
+
+                    data = file_path.read_bytes()
+                    file_info = tarfile.TarInfo(name=tar_file_path)
+                    file_info.size = len(data)
+                    file_info.mode = mode
+                    file_info.mtime = now
+                    file_info.uname = "root"
+                    file_info.gname = "root"
+                    tar.addfile(file_info, io.BytesIO(data))
+
+    if not output_tar_path.is_file():
+        raise BuildError(f"Portable tar.gz archive is missing: {output_tar_path}")
+    return output_tar_path
+
+
+def create_deb_package(
+    source_dir: Path,
+    output_deb_path: Path,
+    version: str,
+    package_name: str = "seekclaw",
+    maintainer: str = "SeekClaw <support@seekclaw.local>",
+    description: str = "SeekClaw desktop client",
+    icon_path: Path | None = None,
+) -> Path:
+    """生成符合 Debian / Ubuntu / Deepin / UOS 标准的 .deb 软件包（纯 Python 实现）。"""
+    remove_file(output_deb_path)
+    output_deb_path.parent.mkdir(parents=True, exist_ok=True)
+
+    total_size_bytes = sum(f.stat().st_size for f in source_dir.rglob("*") if f.is_file())
+    installed_size_kb = (total_size_bytes + 1023) // 1024
+
+    control_content = (
+        f"Package: {package_name}\n"
+        f"Version: {version}\n"
+        f"Section: devel\n"
+        f"Priority: optional\n"
+        f"Architecture: amd64\n"
+        f"Maintainer: {maintainer}\n"
+        f"Installed-Size: {installed_size_kb}\n"
+        f"Homepage: https://github.com/hoilai/SeekClaw\n"
+        f"Description: {description}\n"
+    )
+
+    postinst_content = (
+        "#!/bin/sh\n"
+        "set -e\n"
+        "if [ -f /opt/SeekClaw/chrome-sandbox ]; then\n"
+        "    chmod 4755 /opt/SeekClaw/chrome-sandbox || true\n"
+        "fi\n"
+        "if [ -f /opt/SeekClaw/resources/runtime/seekclaw ]; then\n"
+        "    chmod 755 /opt/SeekClaw/resources/runtime/seekclaw || true\n"
+        "fi\n"
+        "if [ -f /opt/SeekClaw/seekclaw-desktop ]; then\n"
+        "    chmod 755 /opt/SeekClaw/seekclaw-desktop || true\n"
+        "fi\n"
+        "if which update-desktop-database >/dev/null 2>&1; then\n"
+        "    update-desktop-database -q || true\n"
+        "fi\n"
+        "if which gtk-update-icon-cache >/dev/null 2>&1; then\n"
+        "    gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true\n"
+        "fi\n"
+    )
+
+    postrm_content = (
+        "#!/bin/sh\n"
+        "set -e\n"
+        "if which update-desktop-database >/dev/null 2>&1; then\n"
+        "    update-desktop-database -q || true\n"
+        "fi\n"
+        "if which gtk-update-icon-cache >/dev/null 2>&1; then\n"
+        "    gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true\n"
+        "fi\n"
+    )
+
+    # 1. 生成 control.tar.gz
+    control_tar_buf = io.BytesIO()
+    with gzip.GzipFile(fileobj=control_tar_buf, mode="wb", mtime=0) as gz:
+        with tarfile.open(fileobj=gz, mode="w:") as tar:
+            def add_str_file(name: str, str_data: str, mode: int = 0o644):
+                data = str_data.encode("utf-8")
+                ti = tarfile.TarInfo(name=name)
+                ti.size = len(data)
+                ti.mode = mode
+                ti.uid = 0
+                ti.gid = 0
+                ti.uname = "root"
+                ti.gname = "root"
+                ti.mtime = 0
+                tar.addfile(ti, io.BytesIO(data))
+
+            add_str_file("./control", control_content, 0o644)
+            add_str_file("./postinst", postinst_content, 0o755)
+            add_str_file("./postrm", postrm_content, 0o755)
+
+    control_tar_gz = control_tar_buf.getvalue()
+
+    # 2. 生成 data.tar.gz
+    desktop_entry = (
+        "[Desktop Entry]\n"
+        "Name=SeekClaw\n"
+        f"Comment={description}\n"
+        "Exec=/opt/SeekClaw/seekclaw-desktop %U\n"
+        "Terminal=false\n"
+        "Type=Application\n"
+        "Icon=seekclaw\n"
+        "StartupWMClass=SeekClaw\n"
+        "Categories=Development;\n"
+    ).encode("utf-8")
+
+    launcher_script = b"#!/bin/sh\nexec /opt/SeekClaw/seekclaw-desktop \"$@\"\n"
+
+    data_tar_buf = io.BytesIO()
+    with gzip.GzipFile(fileobj=data_tar_buf, mode="wb", mtime=0) as gz:
+        with tarfile.open(fileobj=gz, mode="w:") as tar:
+            def add_file_entry(tar_path: str, data: bytes, mode: int = 0o644):
+                ti = tarfile.TarInfo(name=tar_path)
+                ti.size = len(data)
+                ti.mode = mode
+                ti.uid = 0
+                ti.gid = 0
+                ti.uname = "root"
+                ti.gname = "root"
+                ti.mtime = 0
+                tar.addfile(ti, io.BytesIO(data))
+
+            def add_dir_entry(tar_path: str, mode: int = 0o755):
+                ti = tarfile.TarInfo(name=tar_path)
+                ti.type = tarfile.DIRTYPE
+                ti.mode = mode
+                ti.uid = 0
+                ti.gid = 0
+                ti.uname = "root"
+                ti.gname = "root"
+                ti.mtime = 0
+                tar.addfile(ti)
+
+            for d in [
+                "./opt", "./opt/SeekClaw", "./usr", "./usr/bin", "./usr/share",
+                "./usr/share/applications", "./usr/share/icons", "./usr/share/icons/hicolor",
+                "./usr/share/icons/hicolor/512x512", "./usr/share/icons/hicolor/512x512/apps",
+                "./usr/share/pixmaps",
+            ]:
+                add_dir_entry(d)
+
+            for root, dirs, files in os.walk(source_dir):
+                rel_root = os.path.relpath(root, source_dir).replace("\\", "/")
+                if rel_root != ".":
+                    add_dir_entry(f"./opt/SeekClaw/{rel_root}")
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    rel_path = os.path.relpath(file_path, source_dir).replace("\\", "/")
+                    target_path = f"./opt/SeekClaw/{rel_path}"
+                    is_executable = (
+                        file in ("seekclaw-desktop", "seekclaw", "chrome-sandbox", "chrome_crashpad_handler")
+                        or file.endswith(".so")
+                        or ("runtime" in rel_path and not file.endswith(".txt"))
+                    )
+                    mode = 0o4755 if file == "chrome-sandbox" else (0o755 if is_executable else 0o644)
+                    with open(file_path, "rb") as f:
+                        data = f.read()
+                    add_file_entry(target_path, data, mode)
+
+            add_file_entry("./usr/share/applications/seekclaw.desktop", desktop_entry, 0o644)
+            add_file_entry("./usr/bin/seekclaw", launcher_script, 0o755)
+            if icon_path and icon_path.is_file():
+                icon_bytes = icon_path.read_bytes()
+                add_file_entry("./usr/share/icons/hicolor/512x512/apps/seekclaw.png", icon_bytes, 0o644)
+                add_file_entry("./usr/share/pixmaps/seekclaw.png", icon_bytes, 0o644)
+
+    data_tar_gz = data_tar_buf.getvalue()
+
+    # 3. 组装标准 ar 归档
+    def make_ar_header(name: str, size: int) -> bytes:
+        name_field = name.ljust(16)[:16].encode("ascii")
+        mtime_field = b"0           "
+        uid_field = b"0     "
+        gid_field = b"0     "
+        mode_field = b"100644  "
+        size_field = str(size).ljust(10)[:10].encode("ascii")
+        magic = b"\x60\n"
+        return name_field + mtime_field + uid_field + gid_field + mode_field + size_field + magic
+
+    debian_binary_content = b"2.0\n"
+
+    with open(output_deb_path, "wb") as f:
+        f.write(b"!<arch>\n")
+        # 1. debian-binary
+        f.write(make_ar_header("debian-binary", len(debian_binary_content)))
+        f.write(debian_binary_content)
+        if len(debian_binary_content) % 2 != 0:
+            f.write(b"\n")
+        # 2. control.tar.gz
+        f.write(make_ar_header("control.tar.gz", len(control_tar_gz)))
+        f.write(control_tar_gz)
+        if len(control_tar_gz) % 2 != 0:
+            f.write(b"\n")
+        # 3. data.tar.gz
+        f.write(make_ar_header("data.tar.gz", len(data_tar_gz)))
+        f.write(data_tar_gz)
+        if len(data_tar_gz) % 2 != 0:
+            f.write(b"\n")
+
+    if not output_deb_path.is_file():
+        raise BuildError(f"Debian package is missing: {output_deb_path}")
+    return output_deb_path
+
+
+def create_rpm_package(
+    source_dir: Path,
+    output_rpm_path: Path,
+    version: str,
+    package_name: str = "seekclaw",
+    release: str = "1",
+    maintainer: str = "SeekClaw <support@seekclaw.local>",
+    description: str = "SeekClaw desktop client",
+    icon_path: Path | None = None,
+) -> Path:
+    """生成符合 RedHat / Fedora / CentOS / openSUSE 标准的 .rpm 软件包（纯 Python 实现）。"""
+    remove_file(output_rpm_path)
+    output_rpm_path.parent.mkdir(parents=True, exist_ok=True)
+    now = int(time.time())
+
+    desktop_entry = (
+        "[Desktop Entry]\n"
+        "Name=SeekClaw\n"
+        f"Comment={description}\n"
+        "Exec=/opt/SeekClaw/seekclaw-desktop %U\n"
+        "Terminal=false\n"
+        "Type=Application\n"
+        "Icon=seekclaw\n"
+        "StartupWMClass=SeekClaw\n"
+        "Categories=Development;\n"
+    ).encode("utf-8")
+
+    launcher_script = b"#!/bin/sh\nexec /opt/SeekClaw/seekclaw-desktop \"$@\"\n"
+
+    postin_script = (
+        "if [ -f /opt/SeekClaw/chrome-sandbox ]; then\n"
+        "    chmod 4755 /opt/SeekClaw/chrome-sandbox || true\n"
+        "fi\n"
+        "if [ -f /opt/SeekClaw/resources/runtime/seekclaw ]; then\n"
+        "    chmod 755 /opt/SeekClaw/resources/runtime/seekclaw || true\n"
+        "fi\n"
+        "if [ -f /opt/SeekClaw/seekclaw-desktop ]; then\n"
+        "    chmod 755 /opt/SeekClaw/seekclaw-desktop || true\n"
+        "fi\n"
+        "if which update-desktop-database >/dev/null 2>&1; then\n"
+        "    update-desktop-database -q || true\n"
+        "fi\n"
+        "if which gtk-update-icon-cache >/dev/null 2>&1; then\n"
+        "    gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true\n"
+        "fi\n"
+    )
+
+    postun_script = (
+        "if which update-desktop-database >/dev/null 2>&1; then\n"
+        "    update-desktop-database -q || true\n"
+        "fi\n"
+        "if which gtk-update-icon-cache >/dev/null 2>&1; then\n"
+        "    gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true\n"
+        "fi\n"
+    )
+
+    file_list = []
+
+    def add_file(rel_path: str, data: bytes, mode: int):
+        clean_path = rel_path.replace("\\", "/")
+        if not clean_path.startswith("/"):
+            clean_path = "/" + clean_path
+        file_list.append({
+            "path": clean_path,
+            "data": data,
+            "mode": mode | 0o100000,
+            "mtime": now,
+        })
+
+    def add_dir(rel_path: str, mode: int = 0o755):
+        clean_path = rel_path.replace("\\", "/")
+        if not clean_path.startswith("/"):
+            clean_path = "/" + clean_path
+        file_list.append({
+            "path": clean_path,
+            "data": b"",
+            "mode": mode | 0o040000,
+            "mtime": now,
+        })
+
+    for d in [
+        "/opt", "/opt/SeekClaw", "/usr", "/usr/bin", "/usr/share",
+        "/usr/share/applications", "/usr/share/icons", "/usr/share/icons/hicolor",
+        "/usr/share/icons/hicolor/512x512", "/usr/share/icons/hicolor/512x512/apps",
+        "/usr/share/pixmaps",
+    ]:
+        add_dir(d)
+
+    for root, dirs, files in os.walk(source_dir):
+        rel_root = os.path.relpath(root, source_dir).replace("\\", "/")
+        if rel_root != ".":
+            add_dir(f"/opt/SeekClaw/{rel_root}")
+        for file in sorted(files):
+            file_path = os.path.join(root, file)
+            rel_path = os.path.relpath(file_path, source_dir).replace("\\", "/")
+            target_path = f"/opt/SeekClaw/{rel_path}"
+            is_executable = (
+                file in ("seekclaw-desktop", "seekclaw", "chrome-sandbox", "chrome_crashpad_handler")
+                or file.endswith(".so")
+                or ("runtime" in rel_path and not file.endswith(".txt"))
+            )
+            mode = 0o4755 if file == "chrome-sandbox" else (0o755 if is_executable else 0o644)
+            with open(file_path, "rb") as f:
+                data = f.read()
+            add_file(target_path, data, mode)
+
+    add_file("/usr/share/applications/seekclaw.desktop", desktop_entry, 0o644)
+    add_file("/usr/bin/seekclaw", launcher_script, 0o755)
+    if icon_path and icon_path.is_file():
+        icon_bytes = icon_path.read_bytes()
+        add_file("/usr/share/icons/hicolor/512x512/apps/seekclaw.png", icon_bytes, 0o644)
+        add_file("/usr/share/pixmaps/seekclaw.png", icon_bytes, 0o644)
+
+    file_list.sort(key=lambda x: x["path"])
+
+    # 1. 组装 CPIO 归档并使用 Gzip 压缩
+    cpio_buf = bytearray()
+    for i, item in enumerate(file_list, start=1):
+        cpio_path = "." + item["path"]
+        entry = _make_cpio_entry(cpio_path, item["data"], item["mode"], i, item["mtime"])
+        cpio_buf.extend(entry)
+
+    trailer_path = "TRAILER!!!"
+    trailer_header = (
+        f"070701"
+        f"{0:08x}"
+        f"{0:08x}"
+        f"{0:08x}"
+        f"{0:08x}"
+        f"{1:08x}"
+        f"{0:08x}"
+        f"{0:08x}"
+        f"{0:08x}"
+        f"{0:08x}"
+        f"{0:08x}"
+        f"{0:08x}"
+        f"{len(trailer_path) + 1:08x}"
+        f"{0:08x}"
+    ).encode("ascii")
+    trailer_path_bytes = trailer_path.encode("ascii") + b"\x00"
+    trailer_padding = b"\x00" * ((4 - (len(trailer_header) + len(trailer_path_bytes)) % 4) % 4)
+    cpio_buf.extend(trailer_header + trailer_path_bytes + trailer_padding)
+    cpio_padding = b"\x00" * ((512 - len(cpio_buf) % 512) % 512)
+    cpio_buf.extend(cpio_padding)
+
+    uncompressed_payload_size = len(cpio_buf)
+    compressed_payload = gzip.compress(bytes(cpio_buf), compresslevel=6, mtime=0)
+
+    # 2. 收集文件列表元数据
+    dir_list = []
+    dir_map = {}
+    basenames = []
+    dirindexes = []
+    filesizes = []
+    filemodes = []
+    filemtimes = []
+    filemd5s = []
+    filelinktos = []
+    fileflags = []
+    fileusernames = []
+    filegroupnames = []
+    filedevices = []
+    fileinodes = []
+    filelangs = []
+    total_installed_size = 0
+
+    for i, item in enumerate(file_list, start=1):
+        p = item["path"]
+        dirname, basename = p.rsplit("/", 1)
+        dirname = dirname + "/"
+        if dirname not in dir_map:
+            dir_map[dirname] = len(dir_list)
+            dir_list.append(dirname)
+
+        dirindexes.append(dir_map[dirname])
+        basenames.append(basename)
+        filesizes.append(len(item["data"]))
+        filemodes.append(item["mode"])
+        filemtimes.append(item["mtime"])
+        filemd5s.append(hashlib.md5(item["data"]).hexdigest() if len(item["data"]) > 0 else "")
+        filelinktos.append("")
+        fileflags.append(0)
+        fileusernames.append("root")
+        filegroupnames.append("root")
+        filedevices.append(1)
+        fileinodes.append(i)
+        filelangs.append("")
+        total_installed_size += len(item["data"])
+
+    # 3. 构建 Main Header
+    hb = RpmHeaderBuilder()
+    hb.add_string(1000, package_name)
+    hb.add_string(1001, version)
+    hb.add_string(1002, release)
+    hb.add_i18n_string(1004, [description])
+    hb.add_i18n_string(1005, [description])
+    hb.add_int32_array(1006, [now])
+    hb.add_int32_array(1009, [total_installed_size])
+    hb.add_string(1010, "SeekClaw")
+    hb.add_string(1011, "SeekClaw")
+    hb.add_string(1014, "MIT")
+    hb.add_string(1015, maintainer)
+    hb.add_i18n_string(1016, ["Development/Tools"])
+    hb.add_string(1020, "https://github.com/hoilai/SeekClaw")
+    hb.add_string(1021, "linux")
+    hb.add_string(1022, "x86_64")
+    hb.add_string(1023, postin_script)
+    hb.add_string(1024, postun_script)
+    hb.add_int32_array(1028, filesizes)
+    hb.add_int16_array(1030, filemodes)
+    hb.add_int16_array(1033, [0] * len(file_list))
+    hb.add_int32_array(1034, filemtimes)
+    hb.add_string_array(1035, filemd5s)
+    hb.add_string_array(1036, filelinktos)
+    hb.add_int32_array(1037, fileflags)
+    hb.add_string_array(1039, fileusernames)
+    hb.add_string_array(1040, filegroupnames)
+    hb.add_string(1044, f"{package_name}-{version}-{release}.src.rpm")
+    hb.add_string(1085, "/bin/sh")
+    hb.add_string(1086, "/bin/sh")
+    hb.add_int32_array(1095, filedevices)
+    hb.add_int32_array(1096, fileinodes)
+    hb.add_string_array(1097, filelangs)
+    hb.add_int32_array(1116, dirindexes)
+    hb.add_string_array(1117, basenames)
+    hb.add_string_array(1118, dir_list)
+    hb.add_string(1124, "cpio")
+    hb.add_string(1125, "gzip")
+    hb.add_string(1126, "9")
+
+    main_header_bytes = hb.build()
+
+    # 4. 构建 Signature Header
+    combined_header_and_payload = main_header_bytes + compressed_payload
+    sig_builder = RpmHeaderBuilder()
+    sig_builder.add_int32_array(1000, [len(combined_header_and_payload)])
+    sig_builder.add_bin(1004, hashlib.md5(combined_header_and_payload).digest())
+    sig_builder.add_string(1007, hashlib.sha1(main_header_bytes).hexdigest())
+    sig_builder.add_int32_array(1008, [uncompressed_payload_size])
+    sig_header_bytes = sig_builder.build()
+
+    sig_padding_len = (8 - len(sig_header_bytes) % 8) % 8
+    sig_header_padded = sig_header_bytes + (b"\x00" * sig_padding_len)
+
+    # 5. 构建 96 字节 Lead
+    lead_name = f"{package_name}-{version}-{release}".encode("utf-8")[:65]
+    lead = bytearray(96)
+    lead[0:4] = RPM_MAGIC
+    lead[4] = 3   # Major
+    lead[5] = 0   # Minor
+    struct.pack_into(">h", lead, 6, 1)   # Type: binary
+    struct.pack_into(">h", lead, 8, 1)   # Arch: x86_64
+    lead[10:10+len(lead_name)] = lead_name
+    struct.pack_into(">h", lead, 76, 1)  # OS: Linux
+    struct.pack_into(">h", lead, 78, 5)  # Signature type: 5 (Header-style)
+
+    with open(output_rpm_path, "wb") as f:
+        f.write(lead)
+        f.write(sig_header_padded)
+        f.write(main_header_bytes)
+        f.write(compressed_payload)
+
+    if not output_rpm_path.is_file():
+        raise BuildError(f"RPM package is missing: {output_rpm_path}")
+    return output_rpm_path
+
+
+# ==============================================================================
+# 通用构建与路径辅助函数
+# ==============================================================================
 
 def read_desktop_version(package_file: Path = DESKTOP_PACKAGE_FILE) -> str:
     try:
@@ -206,6 +832,7 @@ def require_command(name: str) -> str:
         raise BuildError(f"Required command was not found in PATH: {name}")
     return command
 
+
 def run(command: str, arguments: Sequence[str], cwd: Path, env: dict[str, str], verbose: bool = False) -> None:
     """运行子进程。默认静默刷屏输出，失败时保留并显示 stderr 与 stdout 详情。"""
     printable = subprocess.list2cmdline([command, *arguments])
@@ -215,7 +842,6 @@ def run(command: str, arguments: Sequence[str], cwd: Path, env: dict[str, str], 
         subprocess.run([command, *arguments], cwd=cwd, env=env, check=True)
         return
 
-    # ✅ 显式指定 encoding="utf-8" 并设置 errors="replace" 防止遇到非标准字符时崩溃
     result = subprocess.run(
         [command, *arguments],
         cwd=cwd,
@@ -244,7 +870,6 @@ MAX_ERROR_LINES = 200
 
 
 def _print_failure_output(text: str, title: str) -> None:
-    """打印子进程失败时的输出；内容过长时仅保留尾部并标注截断行数。"""
     content = text.strip()
     if not content:
         return
@@ -256,15 +881,15 @@ def _print_failure_output(text: str, title: str) -> None:
     console.print(Panel(content, title=title, border_style="red"))
 
 
-def package_desktop(
+def package_desktop_windows(
     pnpm: str, env: dict[str, str], build_target: str, attempts: int = 3, verbose: bool = False
 ) -> None:
-    if build_target == PORTABLE_TARGET:
+    if build_target == TARGET_PORTABLE:
         electron_target = "dir"
-    elif build_target == INSTALLER_TARGET:
+    elif build_target == TARGET_INSTALLER:
         electron_target = "nsis"
     else:
-        raise BuildError(f"Unknown Desktop build target: {build_target}")
+        raise BuildError(f"Unknown Windows Desktop build target: {build_target}")
 
     arguments = ["exec", "electron-builder", "--win", electron_target, "--x64"]
     for attempt in range(1, attempts + 1):
@@ -276,6 +901,24 @@ def package_desktop(
                 raise
             console.print(
                 f"[yellow]⚠️ Electron 打包失败 (第 {attempt}/{attempts} 次尝试); 正在清理并准备重试...[/yellow]"
+            )
+            remove_directory(BUILDER_OUTPUT)
+            time.sleep(3 * attempt)
+
+
+def package_desktop_linux(
+    pnpm: str, env: dict[str, str], attempts: int = 3, verbose: bool = False
+) -> None:
+    arguments = ["exec", "electron-builder", "--linux", "dir", "--x64"]
+    for attempt in range(1, attempts + 1):
+        try:
+            run(pnpm, arguments, DESKTOP_DIR, env, verbose=verbose)
+            return
+        except subprocess.CalledProcessError:
+            if attempt == attempts:
+                raise
+            console.print(
+                f"[yellow]⚠️ Electron Linux 打包失败 (第 {attempt}/{attempts} 次尝试); 正在清理并准备重试...[/yellow]"
             )
             remove_directory(BUILDER_OUTPUT)
             time.sleep(3 * attempt)
@@ -300,31 +943,39 @@ def find_installer_artifact(version: str) -> Path:
     raise BuildError(f"Could not identify a unique installer executable: {names}")
 
 
-def create_portable_zip() -> Path:
-    r"""将 publish\SeekClaw-win-x64 文件夹压缩为 publish\SeekClaw-portable-win-x64.zip。"""
-    remove_file(PORTABLE_ZIP_OUTPUT)
+def create_portable_zip(source_dir: Path, output_zip_path: Path) -> Path:
+    r"""将发布目录压缩为 .zip 文件。"""
+    remove_file(output_zip_path)
+    base_name = str(output_zip_path.with_suffix(""))
     shutil.make_archive(
-        str(PORTABLE_ZIP_BASE_NAME),
+        base_name,
         "zip",
-        root_dir=PUBLISH_DIR,
-        base_dir=PORTABLE_OUTPUT.name,
+        root_dir=source_dir.parent,
+        base_dir=source_dir.name,
     )
-    if not PORTABLE_ZIP_OUTPUT.is_file():
-        raise BuildError(f"Portable archive is missing: {PORTABLE_ZIP_OUTPUT}")
-    return PORTABLE_ZIP_OUTPUT
+    if not output_zip_path.is_file():
+        raise BuildError(f"Portable zip archive is missing: {output_zip_path}")
+    return output_zip_path
 
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Build the latest self-contained Runtime and Desktop release."
+        description="Build the latest self-contained Runtime and Desktop release for Windows & Linux."
     )
     parser.add_argument("--skip-tests", action="store_true", help="Skip .NET and Desktop tests.")
     parser.add_argument("--skip-install", action="store_true", help="Skip pnpm install.")
     parser.add_argument("-v", "--verbose", action="store_true", help="Show full stdout from subcommands.")
     parser.add_argument(
+        "--platform",
+        "--os",
+        dest="platform",
+        choices=["windows", "win", "linux"],
+        help="目标操作系统平台 (windows / linux)；省略时以交互菜单选择。",
+    )
+    parser.add_argument(
         "--target",
-        choices=[PORTABLE_TARGET, INSTALLER_TARGET, BOTH_TARGET],
-        help="构建目标；省略时以交互菜单选择。",
+        choices=[TARGET_PORTABLE, TARGET_INSTALLER, TARGET_BOTH, TARGET_DEB, TARGET_RPM, TARGET_ALL],
+        help="构建目标 (portable/installer/both/deb/rpm/all)；省略时以交互菜单选择。",
     )
     parser.add_argument(
         "--keep-output",
@@ -334,18 +985,70 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def prompt_build_target() -> str:
-    """使用 Questionary 库提供交互式键盘光标选择菜单；未安装时退回文本选择。"""
+def prompt_platform() -> str:
+    """交互选择目标平台：Windows 或 Linux。"""
     if questionary is None:
-        return _prompt_build_target_stdlib()
+        return _prompt_platform_stdlib()
     try:
         choice = questionary.select(
-            "请选择构建类型：",
+            "请选择编译目标操作系统 (OS / Architecture: 64位 x64)：",
             choices=[
-                questionary.Choice("📦 免安装版 (Portable 绿色解压文件夹)", value=PORTABLE_TARGET),
-                questionary.Choice("💿 安装包版 (NSIS 可执行安装程序)", value=INSTALLER_TARGET),
-                questionary.Choice("🚀 同时打包免安装版和安装版", value=BOTH_TARGET),
+                questionary.Choice("🪟 Windows (win-x64)", value=PLATFORM_WINDOWS),
+                questionary.Choice("🐧 Linux (linux-x64 / amd64)", value=PLATFORM_LINUX),
             ],
+            style=questionary.Style([
+                ('qmark', 'fg:#00ffff bold'),
+                ('question', 'bold'),
+                ('pointer', 'fg:#00ff00 bold'),
+                ('highlighted', 'fg:#00ff00 bold'),
+            ])
+        ).ask()
+    except (EOFError, KeyboardInterrupt):
+        choice = None
+
+    if not choice:
+        raise BuildError("未选择目标平台，构建已取消。")
+    return choice
+
+
+def _prompt_platform_stdlib() -> str:
+    print("\n请选择编译目标操作系统 (OS / Architecture: 64位 x64)：")
+    print(f"1. 🪟 Windows (win-x64) [{PLATFORM_WINDOWS}]")
+    print(f"2. 🐧 Linux (linux-x64 / amd64) [{PLATFORM_LINUX}]")
+    while True:
+        try:
+            raw = input("请输入 1 或 2: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            raise BuildError("未选择目标平台，构建已取消。")
+        if raw in ("1", PLATFORM_WINDOWS, "win"):
+            return PLATFORM_WINDOWS
+        if raw in ("2", PLATFORM_LINUX):
+            return PLATFORM_LINUX
+        print("无效输入，请重新输入 1 或 2。")
+
+
+def prompt_build_target(platform: str) -> str:
+    """根据所选操作系统平台展示对应的构建目标菜单。"""
+    if questionary is None:
+        return _prompt_build_target_stdlib(platform)
+    try:
+        if platform == PLATFORM_WINDOWS:
+            choices = [
+                questionary.Choice("📦 免安装便携版 (Portable 绿色解压文件夹及 .zip)", value=TARGET_PORTABLE),
+                questionary.Choice("💿 安装包版 (NSIS 可执行安装程序)", value=TARGET_INSTALLER),
+                questionary.Choice("🚀 同时打包免安装版和安装版", value=TARGET_BOTH),
+            ]
+        else:
+            choices = [
+                questionary.Choice("📦 便携版 (Portable .tar.gz 压缩包及运行目录)", value=TARGET_PORTABLE),
+                questionary.Choice("📦 DEB 安装包 (Debian / Ubuntu / Deepin / UOS .deb)", value=TARGET_DEB),
+                questionary.Choice("📦 RPM 安装包 (Fedora / RHEL / CentOS / openSUSE .rpm)", value=TARGET_RPM),
+                questionary.Choice("🚀 一键打包全部 (便携版 + DEB + RPM)", value=TARGET_ALL),
+            ]
+
+        choice = questionary.select(
+            "请选择构建打包类型：",
+            choices=choices,
             style=questionary.Style([
                 ('qmark', 'fg:#00ffff bold'),
                 ('question', 'bold'),
@@ -361,40 +1064,77 @@ def prompt_build_target() -> str:
     return choice
 
 
-def _prompt_build_target_stdlib() -> str:
-    """未安装 questionary 时的纯文本选择菜单。"""
-    print("\n请选择构建类型：")
-    print(f"1. 📦 免安装版 (Portable 绿色解压文件夹) [{PORTABLE_TARGET}]")
-    print(f"2. 💿 安装包版 (NSIS 可执行安装程序) [{INSTALLER_TARGET}]")
-    print(f"3. 🚀 同时打包免安装版和安装版 [{BOTH_TARGET}]")
-    while True:
-        try:
-            raw = input("请输入 1、2 或 3: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            raise BuildError("未选择构建类型，构建已取消。")
-        if raw in ("1", PORTABLE_TARGET):
-            return PORTABLE_TARGET
-        if raw in ("2", INSTALLER_TARGET):
-            return INSTALLER_TARGET
-        if raw in ("3", BOTH_TARGET):
-            return BOTH_TARGET
-        print("无效输入，请重新输入 1、2 或 3。")
+def _prompt_build_target_stdlib(platform: str) -> str:
+    print("\n请选择构建打包类型：")
+    if platform == PLATFORM_WINDOWS:
+        print(f"1. 📦 免安装便携版 (Portable 绿色解压文件夹及 .zip) [{TARGET_PORTABLE}]")
+        print(f"2. 💿 安装包版 (NSIS 可执行安装程序) [{TARGET_INSTALLER}]")
+        print(f"3. 🚀 同时打包免安装版和安装版 [{TARGET_BOTH}]")
+        while True:
+            try:
+                raw = input("请输入 1、2 或 3: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                raise BuildError("未选择构建类型，构建已取消。")
+            if raw in ("1", TARGET_PORTABLE):
+                return TARGET_PORTABLE
+            if raw in ("2", TARGET_INSTALLER):
+                return TARGET_INSTALLER
+            if raw in ("3", TARGET_BOTH):
+                return TARGET_BOTH
+            print("无效输入，请重新输入 1、2 或 3。")
+    else:
+        print(f"1. 📦 便携版 (Portable .tar.gz 压缩包及运行目录) [{TARGET_PORTABLE}]")
+        print(f"2. 📦 DEB 安装包 (Debian / Ubuntu / Deepin / UOS .deb) [{TARGET_DEB}]")
+        print(f"3. 📦 RPM 安装包 (Fedora / RHEL / CentOS / openSUSE .rpm) [{TARGET_RPM}]")
+        print(f"4. 🚀 一键打包全部 (便携版 + DEB + RPM) [{TARGET_ALL}]")
+        while True:
+            try:
+                raw = input("请输入 1、2、3 或 4: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                raise BuildError("未选择构建类型，构建已取消。")
+            if raw in ("1", TARGET_PORTABLE):
+                return TARGET_PORTABLE
+            if raw in ("2", TARGET_DEB):
+                return TARGET_DEB
+            if raw in ("3", TARGET_RPM):
+                return TARGET_RPM
+            if raw in ("4", TARGET_ALL):
+                return TARGET_ALL
+            print("无效输入，请重新输入 1、2、3 或 4。")
 
 
 def main() -> int:
     args = parse_arguments()
-    
+
     # 顶部 UI Banner 渲染
     console.clear()
-    banner = Text("SeekClaw Runtime & Desktop Release Builder", style="bold cyan")
+    banner = Text("SeekClaw Runtime & Desktop Release Builder (Cross-Platform)", style="bold cyan")
     console.print(Panel(banner, expand=False, border_style="cyan"))
 
-    build_target = args.target or prompt_build_target()
-    
+    # 确定平台
+    platform = args.platform
+    if platform:
+        platform = PLATFORM_WINDOWS if platform in ("win", "windows") else PLATFORM_LINUX
+    else:
+        platform = prompt_platform()
+
+    # 确定构建目标
+    build_target = args.target or prompt_build_target(platform)
+
+    # 验证目标与平台匹配
+    if platform == PLATFORM_WINDOWS and build_target in (TARGET_DEB, TARGET_RPM, TARGET_ALL):
+        build_target = TARGET_BOTH
+    elif platform == PLATFORM_LINUX and build_target in (TARGET_INSTALLER, TARGET_BOTH):
+        build_target = TARGET_ALL
+
+    platform_rid = "win-x64" if platform == PLATFORM_WINDOWS else "linux-x64"
+    runtime_stage = DESKTOP_DIR / "runtime" / platform_rid
+    unpacked_output = BUILDER_OUTPUT / ("win-unpacked" if platform == PLATFORM_WINDOWS else "linux-unpacked")
+
     start_time = time.time()
     dotnet = require_command("dotnet")
     pnpm = require_command("pnpm")
-    
+
     build_env = os.environ.copy()
     if not build_env.get("ELECTRON_MIRROR", "").strip():
         build_env["ELECTRON_MIRROR"] = "https://npmmirror.com/mirrors/electron/"
@@ -407,21 +1147,17 @@ def main() -> int:
     release_version = next_patch_version(previous_version)
     version_committed = False
     write_desktop_version(release_version)
-    
+
     console.print(
-        f"\n[bold green]✓[/bold green] 版本号更新: [dim]{previous_version}[/dim] ➔ [bold cyan]{release_version}[/bold cyan]\n"
+        f"\n[bold green]✓[/bold green] 版本号更新: [dim]{previous_version}[/dim] ➔ [bold cyan]{release_version}[/bold cyan]"
+        f"  (目标平台: [bold magenta]{platform.upper()} (64-bit {platform_rid})[/bold magenta])\n"
     )
 
     try:
-        # 1. 准备环境与工作目录
+        # 1. 准备工作目录
         with console.status("[bold blue]正在重置与清理构建目录...[/bold blue]", spinner="dots"):
-            reset_directory(RUNTIME_STAGE)
+            reset_directory(runtime_stage)
             PUBLISH_DIR.mkdir(parents=True, exist_ok=True)
-            if build_target in (PORTABLE_TARGET, BOTH_TARGET):
-                reset_directory(PORTABLE_OUTPUT)
-                remove_file(PORTABLE_ZIP_OUTPUT)
-            if build_target in (INSTALLER_TARGET, BOTH_TARGET):
-                remove_file(INSTALLER_OUTPUT)
             remove_directory(BUILDER_OUTPUT)
         console.print("[bold green]✓[/bold green] 构建目录准备完成")
 
@@ -438,8 +1174,8 @@ def main() -> int:
                 run(pnpm, ["test"], DESKTOP_DIR, build_env, verbose=args.verbose)
             console.print("[bold green]✓[/bold green] 测试全部通过")
 
-        # 4. 发布 .NET 独立运行时
-        with console.status("[bold blue]正在编译与发布 .NET 自包含 Runtime...[/bold blue]", spinner="dots"):
+        # 4. 发布 .NET 独立运行时 (自包含 SingleFile，无任何外部 runtime 依赖)
+        with console.status(f"[bold blue]正在编译与发布 .NET 自包含 Runtime ({platform_rid})...[/bold blue]", spinner="dots"):
             run(
                 dotnet,
                 [
@@ -448,7 +1184,7 @@ def main() -> int:
                     "-c",
                     "Release",
                     "-r",
-                    "win-x64",
+                    platform_rid,
                     "--self-contained",
                     "true",
                     "-p:PublishSingleFile=true",
@@ -456,76 +1192,139 @@ def main() -> int:
                     "-p:DebugType=None",
                     "-p:DebugSymbols=false",
                     "-o",
-                    str(RUNTIME_STAGE),
+                    str(runtime_stage),
                 ],
                 REPO_ROOT,
                 build_env,
                 verbose=args.verbose,
             )
-        console.print("[bold green]✓[/bold green] .NET Runtime 编译完成")
+        console.print(f"[bold green]✓[/bold green] .NET 自包含 Runtime ({platform_rid}) 编译完成")
 
-        # 5. 构建与打包 Electron 应用
+        # 5. 构建与打包前端及 Electron
         with console.status("[bold blue]正在构建前端组件并打包 Electron...[/bold blue]", spinner="dots"):
             run(pnpm, ["build"], DESKTOP_DIR, build_env, verbose=args.verbose)
-            if build_target in (PORTABLE_TARGET, BOTH_TARGET):
-                package_desktop(pnpm, build_env, PORTABLE_TARGET, verbose=args.verbose)
-            if build_target in (INSTALLER_TARGET, BOTH_TARGET):
-                package_desktop(pnpm, build_env, INSTALLER_TARGET, verbose=args.verbose)
+            if platform == PLATFORM_WINDOWS:
+                if build_target in (TARGET_PORTABLE, TARGET_BOTH):
+                    package_desktop_windows(pnpm, build_env, TARGET_PORTABLE, verbose=args.verbose)
+                if build_target in (TARGET_INSTALLER, TARGET_BOTH):
+                    package_desktop_windows(pnpm, build_env, TARGET_INSTALLER, verbose=args.verbose)
+            else:
+                package_desktop_linux(pnpm, build_env, verbose=args.verbose)
         console.print("[bold green]✓[/bold green] Electron 应用打包完成")
 
-        # 6. 校验产物与移动定位
+        # 6. 生成分发包与产物组织
         release_outputs: list[Path] = []
+        launch_entry: Path | None = None
 
-        if build_target in (PORTABLE_TARGET, BOTH_TARGET):
-            if not UNPACKED_OUTPUT.is_dir():
-                raise BuildError(f"Electron builder output was not found: {UNPACKED_OUTPUT}")
+        if platform == PLATFORM_WINDOWS:
+            portable_output = PUBLISH_DIR / "SeekClaw-win-x64"
+            portable_zip_output = PUBLISH_DIR / "SeekClaw-portable-win-x64.zip"
+            installer_output = PUBLISH_DIR / "SeekClaw-Setup-win-x64.exe"
 
-            desktop_executable = UNPACKED_OUTPUT / "SeekClaw.exe"
-            runtime_executable = UNPACKED_OUTPUT / "resources" / "runtime" / "seekclaw.exe"
+            if build_target in (TARGET_PORTABLE, TARGET_BOTH):
+                if not unpacked_output.is_dir():
+                    raise BuildError(f"Electron builder output was not found: {unpacked_output}")
+
+                desktop_executable = unpacked_output / "SeekClaw.exe"
+                runtime_executable = unpacked_output / "resources" / "runtime" / "seekclaw.exe"
+                if not desktop_executable.is_file():
+                    raise BuildError(f"Desktop executable is missing: {desktop_executable}")
+                if not runtime_executable.is_file():
+                    raise BuildError(f"Bundled Runtime executable is missing: {runtime_executable}")
+
+                shutil.copytree(unpacked_output, portable_output, dirs_exist_ok=True)
+                release_outputs.append(portable_output)
+                release_outputs.append(create_portable_zip(portable_output, portable_zip_output))
+                launch_entry = portable_output / "SeekClaw.exe"
+
+            if build_target in (TARGET_INSTALLER, TARGET_BOTH):
+                installer_artifact = find_installer_artifact(release_version)
+                shutil.copy2(installer_artifact, installer_output)
+                if not installer_output.is_file():
+                    raise BuildError(f"Installer executable is missing: {installer_output}")
+                release_outputs.append(installer_output)
+
+            target_label = (
+                "免安装版 + NSIS 安装程序" if build_target == TARGET_BOTH
+                else ("NSIS 安装程序" if build_target == TARGET_INSTALLER else "免安装便携版 (Portable)")
+            )
+
+        else:
+            # Linux 打包产物生成
+            if not unpacked_output.is_dir():
+                raise BuildError(f"Electron Linux builder output was not found: {unpacked_output}")
+
+            desktop_executable = unpacked_output / "seekclaw-desktop"
+            runtime_executable = unpacked_output / "resources" / "runtime" / "seekclaw"
             if not desktop_executable.is_file():
-                raise BuildError(f"Desktop executable is missing: {desktop_executable}")
+                raise BuildError(f"Linux desktop executable is missing: {desktop_executable}")
             if not runtime_executable.is_file():
-                raise BuildError(f"Bundled Runtime executable is missing: {runtime_executable}")
+                raise BuildError(f"Bundled Linux Runtime executable is missing: {runtime_executable}")
 
-            shutil.copytree(UNPACKED_OUTPUT, PORTABLE_OUTPUT, dirs_exist_ok=True)
-            desktop_executable = PORTABLE_OUTPUT / "SeekClaw.exe"
-            runtime_executable = PORTABLE_OUTPUT / "resources" / "runtime" / "seekclaw.exe"
-            if not desktop_executable.is_file():
-                raise BuildError(f"Desktop executable is missing: {desktop_executable}")
-            if not runtime_executable.is_file():
-                raise BuildError(f"Bundled Runtime executable is missing: {runtime_executable}")
-            release_outputs.append(PORTABLE_OUTPUT)
-            release_outputs.append(create_portable_zip())
+            portable_output = PUBLISH_DIR / "SeekClaw-linux-x64"
+            portable_tar_output = PUBLISH_DIR / "SeekClaw-portable-linux-x64.tar.gz"
+            deb_output = PUBLISH_DIR / f"SeekClaw-{release_version}_amd64.deb"
+            rpm_output = PUBLISH_DIR / f"SeekClaw-{release_version}.x86_64.rpm"
 
-        if build_target in (INSTALLER_TARGET, BOTH_TARGET):
-            installer_artifact = find_installer_artifact(release_version)
-            shutil.copy2(installer_artifact, INSTALLER_OUTPUT)
-            if not INSTALLER_OUTPUT.is_file():
-                raise BuildError(f"Installer executable is missing: {INSTALLER_OUTPUT}")
-            release_outputs.append(INSTALLER_OUTPUT)
+            # 6.1 便携版
+            if build_target in (TARGET_PORTABLE, TARGET_ALL):
+                with console.status("[bold blue]正在生成 Linux 便携版 (.tar.gz)...[/bold blue]", spinner="dots"):
+                    shutil.copytree(unpacked_output, portable_output, dirs_exist_ok=True)
+                    create_linux_portable_tar(unpacked_output, portable_tar_output)
+                console.print("[bold green]✓[/bold green] Linux 便携版打包完成")
+                release_outputs.append(portable_output)
+                release_outputs.append(portable_tar_output)
+                launch_entry = portable_output / "seekclaw-desktop"
+
+            # 6.2 DEB 安装包
+            if build_target in (TARGET_DEB, TARGET_ALL):
+                with console.status("[bold blue]正在生成 Debian / Ubuntu 安装包 (.deb)...[/bold blue]", spinner="dots"):
+                    create_deb_package(
+                        source_dir=unpacked_output,
+                        output_deb_path=deb_output,
+                        version=release_version,
+                        icon_path=ICON_PNG_PATH,
+                    )
+                console.print("[bold green]✓[/bold green] Linux DEB 安装包生成完成")
+                release_outputs.append(deb_output)
+
+            # 6.3 RPM 安装包
+            if build_target in (TARGET_RPM, TARGET_ALL):
+                with console.status("[bold blue]正在生成 RedHat / Fedora / CentOS 安装包 (.rpm)...[/bold blue]", spinner="dots"):
+                    create_rpm_package(
+                        source_dir=unpacked_output,
+                        output_rpm_path=rpm_output,
+                        version=release_version,
+                        icon_path=ICON_PNG_PATH,
+                    )
+                console.print("[bold green]✓[/bold green] Linux RPM 安装包生成完成")
+                release_outputs.append(rpm_output)
+
+            if build_target == TARGET_ALL:
+                target_label = "全量包 (便携版 + DEB + RPM)"
+            elif build_target == TARGET_DEB:
+                target_label = "Debian / Ubuntu 安装包 (.deb)"
+            elif build_target == TARGET_RPM:
+                target_label = "RedHat / Fedora / CentOS 安装包 (.rpm)"
+            else:
+                target_label = "免安装便携版 (.tar.gz)"
 
         version_committed = True
         elapsed = time.time() - start_time
 
-        # 渲染最终构建结果摘要表格 (Summary Card)
-        if build_target == BOTH_TARGET:
-            target_label = "免安装版 + NSIS 安装程序"
-        elif build_target == INSTALLER_TARGET:
-            target_label = "NSIS 安装程序"
-        else:
-            target_label = "免安装版 (Portable)"
-
+        # 渲染最终构建结果摘要表格
         console.print("\n")
-        table = Table(title="🎉 SeekClaw 构建成功", border_style="green", header_style="bold green")
+        table = Table(title=f"🎉 SeekClaw ({platform.upper()} x64) 构建成功", border_style="green", header_style="bold green")
         table.add_column("属性", style="bold cyan")
         table.add_column("详情", style="white")
 
-        table.add_row("目标类型", target_label)
+        table.add_row("目标平台", f"{platform.upper()} (64-bit {platform_rid})")
+        table.add_row("打包类型", target_label)
         table.add_row("发布版本", f"[bold yellow]{release_version}[/bold yellow]")
         for output in release_outputs:
             table.add_row("输出文件/路径", f"[underline cyan]{output}[/underline cyan]")
-        if build_target in (PORTABLE_TARGET, BOTH_TARGET):
-            table.add_row("启动入口", str(desktop_executable))
+        if launch_entry:
+            table.add_row("便携启动入口", str(launch_entry))
         table.add_row("总计耗时", f"{elapsed:.1f} 秒")
 
         console.print(table)

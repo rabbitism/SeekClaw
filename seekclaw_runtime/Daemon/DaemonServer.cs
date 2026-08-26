@@ -141,6 +141,11 @@ public sealed class DaemonServer : IAsyncDisposable
         await _scheduler.DisposeAsync().ConfigureAwait(false);
         _sharedHttp.Dispose();
         _shutdown.Dispose();
+
+        if (!OperatingSystem.IsWindows() && File.Exists(SocketPath))
+        {
+            try { File.Delete(SocketPath); } catch { }
+        }
     }
 
     public async Task RunAsync(CancellationToken ct)
@@ -148,30 +153,40 @@ public sealed class DaemonServer : IAsyncDisposable
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, _shutdown.Token);
         var runCt = linkedCts.Token;
         var schedulerTask = RunSchedulerAsync(runCt);
-        while (!runCt.IsCancellationRequested)
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                while (!runCt.IsCancellationRequested)
+                {
+                    try
+                    {
+                        await ServeNamedPipeAsync(runCt).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (runCt.IsCancellationRequested)
+                    {
+                        break;
+                    }
+                    catch (Exception)
+                    {
+                        await Task.Delay(100, runCt).ConfigureAwait(false);
+                    }
+                }
+            }
+            else
+            {
+                await ServeUnixSocketLoopAsync(runCt).ConfigureAwait(false);
+            }
+        }
+        finally
         {
             try
             {
-                if (OperatingSystem.IsWindows())
-                    await ServeNamedPipeAsync(runCt).ConfigureAwait(false);
-                else
-                    await ServeUnixSocketAsync(runCt).ConfigureAwait(false);
+                await schedulerTask.ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (runCt.IsCancellationRequested)
             {
-                break;
             }
-            catch (Exception)
-            {
-                await Task.Delay(100, runCt).ConfigureAwait(false);
-            }
-        }
-        try
-        {
-            await schedulerTask.ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (runCt.IsCancellationRequested)
-        {
         }
     }
 
@@ -195,15 +210,46 @@ public sealed class DaemonServer : IAsyncDisposable
         _ = Task.Run(() => RunPipeConnectionAsync(pipe, ct));
     }
 
-    private async Task ServeUnixSocketAsync(CancellationToken ct)
+    private async Task ServeUnixSocketLoopAsync(CancellationToken ct)
     {
-        if (File.Exists(SocketPath)) File.Delete(SocketPath);
+        var socketDir = Path.GetDirectoryName(SocketPath);
+        if (!string.IsNullOrEmpty(socketDir) && !Directory.Exists(socketDir))
+        {
+            Directory.CreateDirectory(socketDir);
+        }
+
+        if (File.Exists(SocketPath))
+        {
+            try { File.Delete(SocketPath); } catch { }
+        }
+
         using var listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
         listener.Bind(new UnixDomainSocketEndPoint(SocketPath));
-        listener.Listen(10);
+        listener.Listen(128);
 
-        var socket = await listener.AcceptAsync(ct).ConfigureAwait(false);
-        _ = Task.Run(() => RunSocketConnectionAsync(socket, ct));
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                var socket = await listener.AcceptAsync(ct).ConfigureAwait(false);
+                _ = Task.Run(() => RunSocketConnectionAsync(socket, ct), ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                if (ct.IsCancellationRequested) break;
+                Console.Error.WriteLine($"Daemon socket accept error: {ex.Message}");
+                await Task.Delay(100, ct).ConfigureAwait(false);
+            }
+        }
+
+        if (File.Exists(SocketPath))
+        {
+            try { File.Delete(SocketPath); } catch { }
+        }
     }
 
     private async Task RunPipeConnectionAsync(NamedPipeServerStream pipe, CancellationToken ct)
