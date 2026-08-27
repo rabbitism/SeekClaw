@@ -35,11 +35,23 @@ const preview = ref<{ src: string; name: string } | null>(null)
 const regularTools = computed(() => (props.message.tools ?? []).filter((tool) => !tool.diff))
 const editedTools = computed(() => (props.message.tools ?? []).filter((tool) => tool.diff && tool.filePath))
 
-/** System-injected messages (compaction) get dedicated cards. */
-const systemKind = computed<'memory' | null>(() => {
+/** System-injected messages (compaction / verification) get dedicated cards. */
+const systemKind = computed<'memory' | 'verify' | null>(() => {
   const content = props.message.content
   if (content.startsWith('>>> [Context compaction]')) return 'memory'
+  if (content.startsWith('The automatic verification step failed')) return 'verify'
   return null
+})
+
+const systemMeta = computed(() => {
+  switch (systemKind.value) {
+    case 'memory':
+      return { title: '记忆压缩', subtitle: '较早的对话已被总结，以保持上下文可容纳' }
+    case 'verify':
+      return { title: '构建验证', subtitle: '修改后自动运行构建未通过，已自动继续修复' }
+    default:
+      return { title: '', subtitle: '' }
+  }
 })
 
 const systemBody = computed(() => {
@@ -87,14 +99,15 @@ const editStats = computed(() => editedTools.value.reduce((stats, tool) => {
   <article v-if="!message.content?.startsWith('>>> [output truncated]')" class="message" :class="[`message-${message.role}`, { dimmed }]">
     <!-- user: either a real message or a system-injected card -->
     <template v-if="message.role === 'user'">
-      <div v-if="systemKind === 'memory'" class="system-card system-memory">
+      <div v-if="systemKind" class="system-card" :class="`system-${systemKind}`">
         <button class="system-card-header" type="button" @click="systemOpen = !systemOpen">
           <span class="system-card-icon">
-            <Layers :size="15" />
+            <Layers v-if="systemKind === 'memory'" :size="15" />
+            <CircleAlert v-else :size="15" />
           </span>
           <div class="system-card-title">
-            <strong>记忆压缩</strong>
-            <small>较早的对话已被总结，以保持上下文可容纳</small>
+            <strong>{{ systemMeta.title }}</strong>
+            <small>{{ systemMeta.subtitle }}</small>
           </div>
           <ChevronDown :size="15" :class="{ rotated: systemOpen }" />
         </button>
@@ -222,6 +235,11 @@ const editStats = computed(() => editedTools.value.reduce((stats, tool) => {
 .system-memory .system-card-icon {
   color: var(--accent);
   background: var(--accent-soft);
+}
+
+.system-verify .system-card-icon {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
 
 .system-card-title {

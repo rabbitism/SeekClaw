@@ -115,6 +115,7 @@ VERSION_PATTERN = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 
 PLATFORM_WINDOWS = "windows"
 PLATFORM_LINUX = "linux"
+PLATFORM_BOTH = "both"
 
 TARGET_PORTABLE = "portable"
 TARGET_INSTALLER = "installer"
@@ -171,6 +172,10 @@ class RpmHeaderBuilder:
         val_bytes = struct.pack(f">{len(values)}I", *[v & 0xFFFFFFFF for v in values])
         self.entries.append((tag, TYPE_INT32, val_bytes, len(values)))
 
+    def add_int64_array(self, tag: int, values: Sequence[int]):
+        val_bytes = struct.pack(f">{len(values)}Q", *[v & 0xFFFFFFFFFFFFFFFF for v in values])
+        self.entries.append((tag, TYPE_INT64, val_bytes, len(values)))
+
     def add_bin(self, tag: int, data: bytes):
         self.entries.append((tag, TYPE_BIN, data, len(data)))
 
@@ -184,10 +189,10 @@ class RpmHeaderBuilder:
         for tag, typ, val_bytes, count in self.entries:
             if typ in (TYPE_INT16,) and len(data_section) % 2 != 0:
                 data_section.extend(b"\x00" * (2 - len(data_section) % 2))
-            elif typ in (TYPE_INT32, TYPE_INT64) and len(data_section) % 4 != 0:
-                data_section.extend(b"\x00" * (4 - len(data_section) % 4))
             elif typ in (TYPE_INT64,) and len(data_section) % 8 != 0:
                 data_section.extend(b"\x00" * (8 - len(data_section) % 8))
+            elif typ in (TYPE_INT32,) and len(data_section) % 4 != 0:
+                data_section.extend(b"\x00" * (4 - len(data_section) % 4))
 
             offset = len(data_section)
             data_section.extend(val_bytes)
@@ -196,8 +201,7 @@ class RpmHeaderBuilder:
         nindex = len(index_entries)
         hsize = len(data_section)
 
-        header_bytes = bytearray(RPM_HEADER_MAGIC)
-        header_bytes[4:8] = struct.pack(">II", nindex, hsize)
+        header_bytes = bytearray(RPM_HEADER_MAGIC) + bytearray(struct.pack(">II", nindex, hsize))
 
         for tag, typ, offset, count in index_entries:
             header_bytes.extend(struct.pack(">IIII", tag, typ, offset, count))
@@ -307,7 +311,7 @@ def create_deb_package(
         f"Architecture: amd64\n"
         f"Maintainer: {maintainer}\n"
         f"Installed-Size: {installed_size_kb}\n"
-        f"Homepage: https://github.com/hoilai/SeekClaw\n"
+        f"Homepage: https://github.com/umr-xiaomai/SeekClaw\n"
         f"Description: {description}\n"
     )
 
@@ -678,11 +682,11 @@ def create_rpm_package(
     hb.add_string(1014, "MIT")
     hb.add_string(1015, maintainer)
     hb.add_i18n_string(1016, ["Development/Tools"])
-    hb.add_string(1020, "https://github.com/hoilai/SeekClaw")
+    hb.add_string(1020, "https://github.com/umr-xiaomai/SeekClaw")
     hb.add_string(1021, "linux")
     hb.add_string(1022, "x86_64")
-    hb.add_string(1023, postin_script)
-    hb.add_string(1024, postun_script)
+    hb.add_string(1024, postin_script)
+    hb.add_string(1026, postun_script)
     hb.add_int32_array(1028, filesizes)
     hb.add_int16_array(1030, filemodes)
     hb.add_int16_array(1033, [0] * len(file_list))
@@ -693,8 +697,8 @@ def create_rpm_package(
     hb.add_string_array(1039, fileusernames)
     hb.add_string_array(1040, filegroupnames)
     hb.add_string(1044, f"{package_name}-{version}-{release}.src.rpm")
-    hb.add_string(1085, "/bin/sh")
     hb.add_string(1086, "/bin/sh")
+    hb.add_string(1088, "/bin/sh")
     hb.add_int32_array(1095, filedevices)
     hb.add_int32_array(1096, fileinodes)
     hb.add_string_array(1097, filelangs)
@@ -790,7 +794,7 @@ def write_desktop_version(version: str, package_file: Path = DESKTOP_PACKAGE_FIL
         raise BuildError(f"Could not update Desktop version in: {package_file}")
 
     try:
-        package_file.write_text(updated, encoding="utf-8")
+        package_file.write_text(updated, encoding="utf-8", newline="\n")
     except OSError as error:
         raise BuildError(f"Could not write Desktop package metadata: {package_file}") from error
 
@@ -969,8 +973,8 @@ def parse_arguments() -> argparse.Namespace:
         "--platform",
         "--os",
         dest="platform",
-        choices=["windows", "win", "linux"],
-        help="目标操作系统平台 (windows / linux)；省略时以交互菜单选择。",
+        choices=["windows", "win", "linux", "both"],
+        help="目标操作系统平台 (windows / linux / both)；省略时以交互菜单选择。",
     )
     parser.add_argument(
         "--target",
@@ -986,7 +990,7 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def prompt_platform() -> str:
-    """交互选择目标平台：Windows 或 Linux。"""
+    """交互选择目标平台：Windows、Linux 或同时打包 Windows + Linux。"""
     if questionary is None:
         return _prompt_platform_stdlib()
     try:
@@ -995,6 +999,7 @@ def prompt_platform() -> str:
             choices=[
                 questionary.Choice("🪟 Windows (win-x64)", value=PLATFORM_WINDOWS),
                 questionary.Choice("🐧 Linux (linux-x64 / amd64)", value=PLATFORM_LINUX),
+                questionary.Choice("🌐 Windows + Linux (同时打包 win-x64 与 linux-x64)", value=PLATFORM_BOTH),
             ],
             style=questionary.Style([
                 ('qmark', 'fg:#00ffff bold'),
@@ -1015,16 +1020,19 @@ def _prompt_platform_stdlib() -> str:
     print("\n请选择编译目标操作系统 (OS / Architecture: 64位 x64)：")
     print(f"1. 🪟 Windows (win-x64) [{PLATFORM_WINDOWS}]")
     print(f"2. 🐧 Linux (linux-x64 / amd64) [{PLATFORM_LINUX}]")
+    print(f"3. 🌐 Windows + Linux 同时打包 [{PLATFORM_BOTH}]")
     while True:
         try:
-            raw = input("请输入 1 或 2: ").strip()
+            raw = input("请输入 1、2 或 3: ").strip()
         except (EOFError, KeyboardInterrupt):
             raise BuildError("未选择目标平台，构建已取消。")
         if raw in ("1", PLATFORM_WINDOWS, "win"):
             return PLATFORM_WINDOWS
         if raw in ("2", PLATFORM_LINUX):
             return PLATFORM_LINUX
-        print("无效输入，请重新输入 1 或 2。")
+        if raw in ("3", PLATFORM_BOTH):
+            return PLATFORM_BOTH
+        print("无效输入，请重新输入 1、2 或 3。")
 
 
 def prompt_build_target(platform: str) -> str:
@@ -1037,6 +1045,11 @@ def prompt_build_target(platform: str) -> str:
                 questionary.Choice("📦 免安装便携版 (Portable 绿色解压文件夹及 .zip)", value=TARGET_PORTABLE),
                 questionary.Choice("💿 安装包版 (NSIS 可执行安装程序)", value=TARGET_INSTALLER),
                 questionary.Choice("🚀 同时打包免安装版和安装版", value=TARGET_BOTH),
+            ]
+        elif platform == PLATFORM_BOTH:
+            choices = [
+                questionary.Choice("🚀 全量发布 (Win 便携版 + NSIS，Linux 便携版 + DEB + RPM)", value=TARGET_ALL),
+                questionary.Choice("📦 双平台便携版 (Win .zip + Linux .tar.gz)", value=TARGET_PORTABLE),
             ]
         else:
             choices = [
@@ -1082,6 +1095,19 @@ def _prompt_build_target_stdlib(platform: str) -> str:
             if raw in ("3", TARGET_BOTH):
                 return TARGET_BOTH
             print("无效输入，请重新输入 1、2 或 3。")
+    elif platform == PLATFORM_BOTH:
+        print(f"1. 🚀 全量发布 (Win 便携版 + NSIS，Linux 便携版 + DEB + RPM) [{TARGET_ALL}]")
+        print(f"2. 📦 双平台便携版 (Win .zip + Linux .tar.gz) [{TARGET_PORTABLE}]")
+        while True:
+            try:
+                raw = input("请输入 1 或 2: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                raise BuildError("未选择构建类型，构建已取消。")
+            if raw in ("1", TARGET_ALL, "all"):
+                return TARGET_ALL
+            if raw in ("2", TARGET_PORTABLE, "portable"):
+                return TARGET_PORTABLE
+            print("无效输入，请重新输入 1 或 2。")
     else:
         print(f"1. 📦 便携版 (Portable .tar.gz 压缩包及运行目录) [{TARGET_PORTABLE}]")
         print(f"2. 📦 DEB 安装包 (Debian / Ubuntu / Deepin / UOS .deb) [{TARGET_DEB}]")
@@ -1089,16 +1115,16 @@ def _prompt_build_target_stdlib(platform: str) -> str:
         print(f"4. 🚀 一键打包全部 (便携版 + DEB + RPM) [{TARGET_ALL}]")
         while True:
             try:
-                raw = input("请输入 1、2、3 或 4: ").strip()
+                raw = input("请输入 1、2、3 或 4: ").strip().lower()
             except (EOFError, KeyboardInterrupt):
                 raise BuildError("未选择构建类型，构建已取消。")
-            if raw in ("1", TARGET_PORTABLE):
+            if raw in ("1", TARGET_PORTABLE, "portable"):
                 return TARGET_PORTABLE
-            if raw in ("2", TARGET_DEB):
+            if raw in ("2", TARGET_DEB, "deb"):
                 return TARGET_DEB
-            if raw in ("3", TARGET_RPM):
+            if raw in ("3", TARGET_RPM, "rpm"):
                 return TARGET_RPM
-            if raw in ("4", TARGET_ALL):
+            if raw in ("4", TARGET_ALL, "all"):
                 return TARGET_ALL
             print("无效输入，请重新输入 1、2、3 或 4。")
 
@@ -1114,7 +1140,12 @@ def main() -> int:
     # 确定平台
     platform = args.platform
     if platform:
-        platform = PLATFORM_WINDOWS if platform in ("win", "windows") else PLATFORM_LINUX
+        if platform in ("win", "windows"):
+            platform = PLATFORM_WINDOWS
+        elif platform == PLATFORM_LINUX:
+            platform = PLATFORM_LINUX
+        else:
+            platform = PLATFORM_BOTH
     else:
         platform = prompt_platform()
 
@@ -1122,14 +1153,59 @@ def main() -> int:
     build_target = args.target or prompt_build_target(platform)
 
     # 验证目标与平台匹配
-    if platform == PLATFORM_WINDOWS and build_target in (TARGET_DEB, TARGET_RPM, TARGET_ALL):
-        build_target = TARGET_BOTH
-    elif platform == PLATFORM_LINUX and build_target in (TARGET_INSTALLER, TARGET_BOTH):
-        build_target = TARGET_ALL
+    if platform == PLATFORM_WINDOWS:
+        if build_target in (TARGET_DEB, TARGET_RPM):
+            raise BuildError(
+                f"构建目标 '{build_target}' 不适用于 Windows 平台。"
+                f"Windows 支持的目标为: {TARGET_PORTABLE}, {TARGET_INSTALLER}, {TARGET_BOTH}。"
+            )
+        if build_target == TARGET_ALL:
+            if args.target:
+                console.print(f"[yellow]提示: Windows 平台下目标 '{TARGET_ALL}' 自动映射为 '{TARGET_BOTH}' (便携版 + 安装包)。[/yellow]")
+            build_target = TARGET_BOTH
+    elif platform == PLATFORM_LINUX:
+        if build_target == TARGET_INSTALLER:
+            raise BuildError(
+                f"构建目标 '{TARGET_INSTALLER}' (NSIS 安装程序) 不适用于 Linux 平台。"
+                f"Linux 支持的目标为: {TARGET_PORTABLE}, {TARGET_DEB}, {TARGET_RPM}, {TARGET_ALL}。"
+            )
+        if build_target == TARGET_BOTH:
+            if args.target:
+                console.print(f"[yellow]提示: Linux 平台下目标 '{TARGET_BOTH}' 自动映射为 '{TARGET_ALL}' (便携版 + DEB + RPM)。[/yellow]")
+            build_target = TARGET_ALL
+    elif platform == PLATFORM_BOTH:
+        if build_target in (TARGET_INSTALLER, TARGET_DEB, TARGET_RPM):
+            if args.target:
+                console.print(f"[yellow]提示: 双平台构建下目标 '{build_target}' 自动调整为全量打包 '{TARGET_ALL}'。[/yellow]")
+            build_target = TARGET_ALL
 
-    platform_rid = "win-x64" if platform == PLATFORM_WINDOWS else "linux-x64"
-    runtime_stage = DESKTOP_DIR / "runtime" / platform_rid
-    unpacked_output = BUILDER_OUTPUT / ("win-unpacked" if platform == PLATFORM_WINDOWS else "linux-unpacked")
+    if platform == PLATFORM_BOTH and build_target == TARGET_PORTABLE:
+        platform_targets = (
+            (PLATFORM_WINDOWS, TARGET_PORTABLE),
+            (PLATFORM_LINUX, TARGET_PORTABLE),
+        )
+    elif platform == PLATFORM_BOTH:
+        platform_targets = (
+            (PLATFORM_WINDOWS, TARGET_BOTH),
+            (PLATFORM_LINUX, TARGET_ALL),
+        )
+    else:
+        platform_targets = ((platform, build_target),)
+
+    build_meta: dict[str, dict[str, Path | str]] = {}
+    for cur_platform, cur_target in platform_targets:
+        if cur_platform == PLATFORM_WINDOWS:
+            rid: str = "win-x64"
+            unpacked = BUILDER_OUTPUT / "win-unpacked"
+        else:
+            rid = "linux-x64"
+            unpacked = BUILDER_OUTPUT / "linux-unpacked"
+        build_meta[cur_platform] = {
+            "target": cur_target,
+            "rid": rid,
+            "runtime_stage": DESKTOP_DIR / "runtime" / rid,
+            "unpacked_output": unpacked,
+        }
 
     start_time = time.time()
     dotnet = require_command("dotnet")
@@ -1148,15 +1224,22 @@ def main() -> int:
     version_committed = False
     write_desktop_version(release_version)
 
+    platform_display = (
+        "WINDOWS + LINUX (win-x64 / linux-x64)"
+        if platform == PLATFORM_BOTH
+        else f"{platform.upper()} (64-bit {'win-x64' if platform == PLATFORM_WINDOWS else 'linux-x64'})"
+    )
+
     console.print(
         f"\n[bold green]✓[/bold green] 版本号更新: [dim]{previous_version}[/dim] ➔ [bold cyan]{release_version}[/bold cyan]"
-        f"  (目标平台: [bold magenta]{platform.upper()} (64-bit {platform_rid})[/bold magenta])\n"
+        f"  (目标平台: [bold magenta]{platform_display}[/bold magenta])\n"
     )
 
     try:
         # 1. 准备工作目录
         with console.status("[bold blue]正在重置与清理构建目录...[/bold blue]", spinner="dots"):
-            reset_directory(runtime_stage)
+            for meta in build_meta.values():
+                reset_directory(Path(meta["runtime_stage"]))
             PUBLISH_DIR.mkdir(parents=True, exist_ok=True)
             remove_directory(BUILDER_OUTPUT)
         console.print("[bold green]✓[/bold green] 构建目录准备完成")
@@ -1175,155 +1258,176 @@ def main() -> int:
             console.print("[bold green]✓[/bold green] 测试全部通过")
 
         # 4. 发布 .NET 独立运行时 (自包含 SingleFile，无任何外部 runtime 依赖)
-        with console.status(f"[bold blue]正在编译与发布 .NET 自包含 Runtime ({platform_rid})...[/bold blue]", spinner="dots"):
-            run(
-                dotnet,
-                [
-                    "publish",
-                    "seekclaw_cli/seekclaw_cli.csproj",
-                    "-c",
-                    "Release",
-                    "-r",
-                    platform_rid,
-                    "--self-contained",
-                    "true",
-                    "-p:PublishSingleFile=true",
-                    "-p:IncludeNativeLibrariesForSelfExtract=true",
-                    "-p:DebugType=None",
-                    "-p:DebugSymbols=false",
-                    "-o",
-                    str(runtime_stage),
-                ],
-                REPO_ROOT,
-                build_env,
-                verbose=args.verbose,
-            )
-        console.print(f"[bold green]✓[/bold green] .NET 自包含 Runtime ({platform_rid}) 编译完成")
+        for cur_platform, meta in build_meta.items():
+            rid: str = meta["rid"]
+            runtime_stage: Path = meta["runtime_stage"]
+            with console.status(f"[bold blue]正在编译与发布 .NET 自包含 Runtime ({cur_platform} {rid})...[/bold blue]", spinner="dots"):
+                run(
+                    dotnet,
+                    [
+                        "publish",
+                        "seekclaw_cli/seekclaw_cli.csproj",
+                        "-c",
+                        "Release",
+                        "-r",
+                        rid,
+                        "--self-contained",
+                        "true",
+                        "-p:PublishSingleFile=true",
+                        "-p:IncludeNativeLibrariesForSelfExtract=true",
+                        "-p:DebugType=None",
+                        "-p:DebugSymbols=false",
+                        "-o",
+                        str(runtime_stage),
+                    ],
+                    REPO_ROOT,
+                    build_env,
+                    verbose=args.verbose,
+                )
+            console.print(f"[bold green]✓[/bold green] .NET 自包含 Runtime ({cur_platform} {rid}) 编译完成")
 
-        # 5. 构建与打包前端及 Electron
-        with console.status("[bold blue]正在构建前端组件并打包 Electron...[/bold blue]", spinner="dots"):
+        # 5. 构建前端并逐个平台打包 Electron
+        with console.status("[bold blue]正在构建前端组件...[/bold blue]", spinner="dots"):
             run(pnpm, ["build"], DESKTOP_DIR, build_env, verbose=args.verbose)
-            if platform == PLATFORM_WINDOWS:
-                if build_target in (TARGET_PORTABLE, TARGET_BOTH):
-                    package_desktop_windows(pnpm, build_env, TARGET_PORTABLE, verbose=args.verbose)
-                if build_target in (TARGET_INSTALLER, TARGET_BOTH):
-                    package_desktop_windows(pnpm, build_env, TARGET_INSTALLER, verbose=args.verbose)
-            else:
-                package_desktop_linux(pnpm, build_env, verbose=args.verbose)
-        console.print("[bold green]✓[/bold green] Electron 应用打包完成")
+        console.print("[bold green]✓[/bold green] 前端组件构建完成")
 
-        # 6. 生成分发包与产物组织
+        # 6. 生成分发包与产物组织（按平台循环，先打包再组装）
         release_outputs: list[Path] = []
-        launch_entry: Path | None = None
+        launch_entries: list[Path] = []
+        target_labels: list[str] = []
 
-        if platform == PLATFORM_WINDOWS:
-            portable_output = PUBLISH_DIR / "SeekClaw-win-x64"
-            portable_zip_output = PUBLISH_DIR / "SeekClaw-portable-win-x64.zip"
-            installer_output = PUBLISH_DIR / "SeekClaw-Setup-win-x64.exe"
+        for cur_platform, meta in build_meta.items():
+            cur_target: str = meta["target"]
+            rid = meta["rid"]
+            unpacked_output: Path = meta["unpacked_output"]
 
-            if build_target in (TARGET_PORTABLE, TARGET_BOTH):
-                if not unpacked_output.is_dir():
-                    raise BuildError(f"Electron builder output was not found: {unpacked_output}")
+            with console.status(f"[bold blue]正在打包 Electron {cur_platform.upper()} 应用...[/bold blue]", spinner="dots"):
+                if cur_platform == PLATFORM_WINDOWS:
+                    if cur_target in (TARGET_PORTABLE, TARGET_BOTH):
+                        package_desktop_windows(pnpm, build_env, TARGET_PORTABLE, verbose=args.verbose)
+                    if cur_target in (TARGET_INSTALLER, TARGET_BOTH):
+                        package_desktop_windows(pnpm, build_env, TARGET_INSTALLER, verbose=args.verbose)
+                else:
+                    package_desktop_linux(pnpm, build_env, verbose=args.verbose)
 
-                desktop_executable = unpacked_output / "SeekClaw.exe"
-                runtime_executable = unpacked_output / "resources" / "runtime" / "seekclaw.exe"
-                if not desktop_executable.is_file():
-                    raise BuildError(f"Desktop executable is missing: {desktop_executable}")
-                if not runtime_executable.is_file():
-                    raise BuildError(f"Bundled Runtime executable is missing: {runtime_executable}")
-
-                shutil.copytree(unpacked_output, portable_output, dirs_exist_ok=True)
-                release_outputs.append(portable_output)
-                release_outputs.append(create_portable_zip(portable_output, portable_zip_output))
-                launch_entry = portable_output / "SeekClaw.exe"
-
-            if build_target in (TARGET_INSTALLER, TARGET_BOTH):
-                installer_artifact = find_installer_artifact(release_version)
-                shutil.copy2(installer_artifact, installer_output)
-                if not installer_output.is_file():
-                    raise BuildError(f"Installer executable is missing: {installer_output}")
-                release_outputs.append(installer_output)
-
-            target_label = (
-                "免安装版 + NSIS 安装程序" if build_target == TARGET_BOTH
-                else ("NSIS 安装程序" if build_target == TARGET_INSTALLER else "免安装便携版 (Portable)")
+            console.print(
+                f"[dim]electron-builder 完成 ({cur_platform}, target={cur_target})，正在组装 publish/ 产物...[/dim]"
             )
 
-        else:
-            # Linux 打包产物生成
-            if not unpacked_output.is_dir():
-                raise BuildError(f"Electron Linux builder output was not found: {unpacked_output}")
+            if cur_platform == PLATFORM_WINDOWS:
+                portable_output = PUBLISH_DIR / "SeekClaw-win-x64"
+                portable_zip_output = PUBLISH_DIR / "SeekClaw-portable-win-x64.zip"
+                installer_output = PUBLISH_DIR / "SeekClaw-Setup-win-x64.exe"
 
-            desktop_executable = unpacked_output / "seekclaw-desktop"
-            runtime_executable = unpacked_output / "resources" / "runtime" / "seekclaw"
-            if not desktop_executable.is_file():
-                raise BuildError(f"Linux desktop executable is missing: {desktop_executable}")
-            if not runtime_executable.is_file():
-                raise BuildError(f"Bundled Linux Runtime executable is missing: {runtime_executable}")
+                if cur_target in (TARGET_PORTABLE, TARGET_BOTH):
+                    if not unpacked_output.is_dir():
+                        raise BuildError(f"Electron builder output was not found: {unpacked_output}")
 
-            portable_output = PUBLISH_DIR / "SeekClaw-linux-x64"
-            portable_tar_output = PUBLISH_DIR / "SeekClaw-portable-linux-x64.tar.gz"
-            deb_output = PUBLISH_DIR / f"SeekClaw-{release_version}_amd64.deb"
-            rpm_output = PUBLISH_DIR / f"SeekClaw-{release_version}.x86_64.rpm"
+                    desktop_executable = unpacked_output / "SeekClaw.exe"
+                    runtime_executable = unpacked_output / "resources" / "runtime" / "seekclaw.exe"
+                    if not desktop_executable.is_file():
+                        raise BuildError(f"Desktop executable is missing: {desktop_executable}")
+                    if not runtime_executable.is_file():
+                        raise BuildError(f"Bundled Runtime executable is missing: {runtime_executable}")
 
-            # 6.1 便携版
-            if build_target in (TARGET_PORTABLE, TARGET_ALL):
-                with console.status("[bold blue]正在生成 Linux 便携版 (.tar.gz)...[/bold blue]", spinner="dots"):
                     shutil.copytree(unpacked_output, portable_output, dirs_exist_ok=True)
-                    create_linux_portable_tar(unpacked_output, portable_tar_output)
-                console.print("[bold green]✓[/bold green] Linux 便携版打包完成")
-                release_outputs.append(portable_output)
-                release_outputs.append(portable_tar_output)
-                launch_entry = portable_output / "seekclaw-desktop"
+                    release_outputs.append(portable_output)
+                    release_outputs.append(create_portable_zip(portable_output, portable_zip_output))
+                    launch_entries.append(portable_output / "SeekClaw.exe")
 
-            # 6.2 DEB 安装包
-            if build_target in (TARGET_DEB, TARGET_ALL):
-                with console.status("[bold blue]正在生成 Debian / Ubuntu 安装包 (.deb)...[/bold blue]", spinner="dots"):
-                    create_deb_package(
-                        source_dir=unpacked_output,
-                        output_deb_path=deb_output,
-                        version=release_version,
-                        icon_path=ICON_PNG_PATH,
-                    )
-                console.print("[bold green]✓[/bold green] Linux DEB 安装包生成完成")
-                release_outputs.append(deb_output)
+                if cur_target in (TARGET_INSTALLER, TARGET_BOTH):
+                    installer_artifact = find_installer_artifact(release_version)
+                    shutil.copy2(installer_artifact, installer_output)
+                    if not installer_output.is_file():
+                        raise BuildError(f"Installer executable is missing: {installer_output}")
+                    release_outputs.append(installer_output)
 
-            # 6.3 RPM 安装包
-            if build_target in (TARGET_RPM, TARGET_ALL):
-                with console.status("[bold blue]正在生成 RedHat / Fedora / CentOS 安装包 (.rpm)...[/bold blue]", spinner="dots"):
-                    create_rpm_package(
-                        source_dir=unpacked_output,
-                        output_rpm_path=rpm_output,
-                        version=release_version,
-                        icon_path=ICON_PNG_PATH,
-                    )
-                console.print("[bold green]✓[/bold green] Linux RPM 安装包生成完成")
-                release_outputs.append(rpm_output)
-
-            if build_target == TARGET_ALL:
-                target_label = "全量包 (便携版 + DEB + RPM)"
-            elif build_target == TARGET_DEB:
-                target_label = "Debian / Ubuntu 安装包 (.deb)"
-            elif build_target == TARGET_RPM:
-                target_label = "RedHat / Fedora / CentOS 安装包 (.rpm)"
+                if cur_target == TARGET_BOTH:
+                    target_labels.append("Windows: 免安装版 + NSIS 安装程序")
+                elif cur_target == TARGET_INSTALLER:
+                    target_labels.append("Windows: NSIS 安装程序")
+                else:
+                    target_labels.append("Windows: 免安装便携版 (Portable)")
             else:
-                target_label = "免安装便携版 (.tar.gz)"
+                # Linux 打包产物生成
+                if not unpacked_output.is_dir():
+                    raise BuildError(f"Electron Linux builder output was not found: {unpacked_output}")
 
+                desktop_executable = unpacked_output / "seekclaw-desktop"
+                runtime_executable = unpacked_output / "resources" / "runtime" / "seekclaw"
+                if not desktop_executable.is_file():
+                    raise BuildError(f"Linux desktop executable is missing: {desktop_executable}")
+                if not runtime_executable.is_file():
+                    raise BuildError(f"Bundled Linux Runtime executable is missing: {runtime_executable}")
+
+                portable_output = PUBLISH_DIR / "SeekClaw-linux-x64"
+                portable_tar_output = PUBLISH_DIR / "SeekClaw-portable-linux-x64.tar.gz"
+                deb_output = PUBLISH_DIR / f"SeekClaw-{release_version}_amd64.deb"
+                rpm_output = PUBLISH_DIR / f"SeekClaw-{release_version}.x86_64.rpm"
+
+                if cur_target in (TARGET_PORTABLE, TARGET_ALL):
+                    with console.status("[bold blue]正在生成 Linux 便携版 (.tar.gz)...[/bold blue]", spinner="dots"):
+                        shutil.copytree(unpacked_output, portable_output, dirs_exist_ok=True)
+                        create_linux_portable_tar(unpacked_output, portable_tar_output)
+                    console.print("[bold green]✓[/bold green] Linux 便携版打包完成")
+                    release_outputs.append(portable_output)
+                    release_outputs.append(portable_tar_output)
+                    launch_entries.append(portable_output / "seekclaw-desktop")
+
+                if cur_target in (TARGET_DEB, TARGET_ALL):
+                    with console.status("[bold blue]正在生成 Debian / Ubuntu 安装包 (.deb)...[/bold blue]", spinner="dots"):
+                        create_deb_package(
+                            source_dir=unpacked_output,
+                            output_deb_path=deb_output,
+                            version=release_version,
+                            icon_path=ICON_PNG_PATH,
+                        )
+                    console.print("[bold green]✓[/bold green] Linux DEB 安装包生成完成")
+                    release_outputs.append(deb_output)
+
+                if cur_target in (TARGET_RPM, TARGET_ALL):
+                    with console.status("[bold blue]正在生成 RedHat / Fedora / CentOS 安装包 (.rpm)...[/bold blue]", spinner="dots"):
+                        create_rpm_package(
+                            source_dir=unpacked_output,
+                            output_rpm_path=rpm_output,
+                            version=release_version,
+                            icon_path=ICON_PNG_PATH,
+                        )
+                    console.print("[bold green]✓[/bold green] Linux RPM 安装包生成完成")
+                    release_outputs.append(rpm_output)
+
+                if cur_target == TARGET_ALL:
+                    target_labels.append("Linux: 全量包 (便携版 + DEB + RPM)")
+                elif cur_target == TARGET_DEB:
+                    target_labels.append("Linux: Debian / Ubuntu 安装包 (.deb)")
+                elif cur_target == TARGET_RPM:
+                    target_labels.append("Linux: RedHat / Fedora / CentOS 安装包 (.rpm)")
+                else:
+                    target_labels.append("Linux: 免安装便携版 (.tar.gz)")
+
+            console.print(f"[bold green]✓[/bold green] {cur_platform.upper()} 应用打包与产物组装完成")
+
+        target_label = " / ".join(target_labels)
         version_committed = True
         elapsed = time.time() - start_time
 
         # 渲染最终构建结果摘要表格
         console.print("\n")
-        table = Table(title=f"🎉 SeekClaw ({platform.upper()} x64) 构建成功", border_style="green", header_style="bold green")
+        table_title = (
+            f"🎉 SeekClaw (WINDOWS + LINUX x64) 构建成功"
+            if platform == PLATFORM_BOTH
+            else f"🎉 SeekClaw ({next(iter(build_meta)).upper()} x64) 构建成功"
+        )
+        table = Table(title=table_title, border_style="green", header_style="bold green")
         table.add_column("属性", style="bold cyan")
         table.add_column("详情", style="white")
 
-        table.add_row("目标平台", f"{platform.upper()} (64-bit {platform_rid})")
+        table.add_row("目标平台", f"[bold magenta]{platform_display}[/bold magenta]")
         table.add_row("打包类型", target_label)
         table.add_row("发布版本", f"[bold yellow]{release_version}[/bold yellow]")
         for output in release_outputs:
             table.add_row("输出文件/路径", f"[underline cyan]{output}[/underline cyan]")
-        if launch_entry:
+        for launch_entry in launch_entries:
             table.add_row("便携启动入口", str(launch_entry))
         table.add_row("总计耗时", f"{elapsed:.1f} 秒")
 
