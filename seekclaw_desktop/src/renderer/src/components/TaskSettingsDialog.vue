@@ -41,7 +41,6 @@ function showWorkspace(): void {
       <header class="task-settings-header">
         <div>
           <h2 id="task-settings-title">任务设置</h2>
-          <p>{{ project ? '任务始终归属于创建它的项目。' : '任务不绑定项目或工作目录。' }}</p>
         </div>
         <button class="icon-button" title="关闭" @click="emit('close')"><X :size="18" /></button>
       </header>

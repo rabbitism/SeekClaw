@@ -110,7 +110,6 @@ onBeforeUnmount(() => document.removeEventListener('keydown', closeOnEscape))
         </button>
         <div class="archived-title-copy">
           <h2 id="archived-title">已归档任务</h2>
-          <p>{{ archivedCount }} 个任务保存在这里，可随时恢复继续工作。</p>
         </div>
       </div>
       <div class="archived-header-actions">

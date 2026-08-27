@@ -2404,10 +2404,10 @@ select:focus-visible {
 .modal-fade-leave-active .provider-editor-dialog,
 .modal-fade-enter-active .about-dialog,
 .modal-fade-leave-active .about-dialog,
-.modal-fade-enter-active .official-skills-dialog,
-.modal-fade-leave-active .official-skills-dialog,
 .modal-fade-enter-active .project-properties-dialog,
-.modal-fade-leave-active .project-properties-dialog {
+.modal-fade-leave-active .project-properties-dialog,
+.modal-fade-enter-active .model-editor-dialog,
+.modal-fade-leave-active .model-editor-dialog {
   transition: opacity 180ms ease, transform 220ms cubic-bezier(.2, .8, .2, 1);
 }
 
@@ -2433,7 +2433,9 @@ select:focus-visible {
 .modal-fade-enter-from .official-skills-dialog,
 .modal-fade-leave-to .official-skills-dialog,
 .modal-fade-enter-from .project-properties-dialog,
-.modal-fade-leave-to .project-properties-dialog {
+.modal-fade-leave-to .project-properties-dialog,
+.modal-fade-enter-from .model-editor-dialog,
+.modal-fade-leave-to .model-editor-dialog {
   opacity: 0;
   transform: translateY(10px) scale(.985);
 }
@@ -3512,6 +3514,162 @@ select:focus-visible {
 }
 
 .provider-editor-footer>div {
+  display: flex;
+  gap: 8px;
+}
+
+.model-editor-backdrop {
+  z-index: 130;
+}
+
+.model-editor-dialog {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(640px, 100%);
+  max-height: min(780px, calc(100vh - 40px));
+  overflow: hidden;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 24px 70px rgb(0 0 0 / 26%), 0 2px 10px rgb(0 0 0 / 10%);
+}
+
+.model-editor-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 20px 24px 17px;
+  border-bottom: 1px solid var(--border);
+}
+
+.model-editor-header h2,
+.model-editor-header p {
+  margin: 0;
+}
+
+.model-editor-header h2 {
+  margin-top: 4px;
+  font-size: 18px;
+  font-weight: 650;
+  letter-spacing: -.01em;
+}
+
+.model-editor-header p {
+  margin-top: 5px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-family: var(--font-mono, monospace);
+}
+
+.model-editor-eyebrow {
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .12em;
+}
+
+.model-editor-body {
+  min-height: 0;
+  padding: 20px 24px;
+  overflow-y: auto;
+}
+
+.model-form-section {
+  padding-bottom: 18px;
+  margin-bottom: 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.model-form-section:last-of-type {
+  padding-bottom: 0;
+  margin-bottom: 0;
+  border-bottom: 0;
+}
+
+.model-section-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.model-section-heading strong {
+  font-size: 13px;
+}
+
+.model-form-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px 14px;
+}
+
+.model-form-grid.two-columns {
+  grid-template-columns: 1fr 1fr;
+}
+
+.model-enabled-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 11px 12px;
+  background: color-mix(in srgb, var(--surface-hover) 55%, transparent);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.model-enabled-row>span:first-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.model-enabled-row small {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.model-enabled-row input:checked+.toggle-switch {
+  background: var(--accent);
+}
+
+.model-enabled-row input:checked+.toggle-switch>span {
+  transform: translateX(16px);
+}
+
+.model-enabled-row input:focus-visible+.toggle-switch {
+  outline: 2px solid color-mix(in srgb, var(--accent) 58%, transparent);
+  outline-offset: 2px;
+}
+
+.model-editor-error {
+  margin-top: 16px;
+  padding: 9px 11px;
+  color: var(--danger);
+  font-size: 12px;
+  background: color-mix(in srgb, var(--danger) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 25%, transparent);
+  border-radius: 7px;
+}
+
+.model-editor-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 24px;
+  background: color-mix(in srgb, var(--sidebar) 72%, var(--surface-raised));
+  border-top: 1px solid var(--border);
+}
+
+.model-editor-footer>span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.model-editor-footer>div {
   display: flex;
   gap: 8px;
 }

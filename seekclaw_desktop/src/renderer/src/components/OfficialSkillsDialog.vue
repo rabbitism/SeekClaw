@@ -73,7 +73,6 @@ onBeforeUnmount(() => document.removeEventListener('keydown', closeOnEscape))
             官方技能
             <span class="official-skills-chip">建设中</span>
           </h2>
-          <p>从官方技能市场中选择并开启你需要的功能，随时可以关闭。</p>
         </div>
       </div>
     </header>

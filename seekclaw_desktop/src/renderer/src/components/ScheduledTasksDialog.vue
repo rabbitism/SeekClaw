@@ -250,7 +250,6 @@ onBeforeUnmount(() => {
         </button>
         <div>
           <h2>计划任务</h2>
-          <span class="scheduled-tasks-subtitle">按 Cron 定时执行智能体任务</span>
         </div>
       </div>
       <div class="scheduled-tasks-actions">

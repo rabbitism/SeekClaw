@@ -26,6 +26,7 @@ import {
 } from '@lucide/vue'
 import { computed, reactive, ref, watch } from 'vue'
 import { confirmAction } from '../confirmation'
+import ModelEditorDialog from './ModelEditorDialog.vue'
 import ProviderEditorDialog from './ProviderEditorDialog.vue'
 import SelectMenu from './SelectMenu.vue'
 
@@ -84,6 +85,15 @@ interface ModelInfo {
   maxOutput: number
   tags: string[]
   capabilities: Record<string, boolean | string>
+}
+
+interface ModelFormValue {
+  provider: string
+  id: string
+  alias: string
+  contextWindow: number
+  maxOutput: number
+  vision: boolean
 }
 
 interface McpServerInfo {
@@ -177,7 +187,7 @@ const providerForm = reactive({
   apiKey: '', models: '', enabled: true, priority: 0,
   modelListUrl: '', timeoutSeconds: 120, proxy: '', promptCaching: true
 })
-const modelForm = reactive({
+const modelForm = reactive<ModelFormValue>({
   provider: '', id: '', alias: '', contextWindow: 128000, maxOutput: 8192, vision: false
 })
 const profileForm = reactive({
@@ -539,6 +549,7 @@ async function fetchProviderModels(provider: ProviderInfo): Promise<void> {
 }
 
 function editModel(model: ModelInfo): void {
+  error.value = ''
   Object.assign(modelForm, {
     provider: model.provider,
     id: model.id,
@@ -550,16 +561,17 @@ function editModel(model: ModelInfo): void {
   modelEditorOpen.value = true
 }
 
-async function saveModel(): Promise<void> {
+async function saveModel(value?: ModelFormValue): Promise<void> {
+  const payload = value ?? modelForm
   beginAction('model.update')
   try {
     await window.seekclaw.daemon.request('model.update', {
-      provider: modelForm.provider,
-      id: modelForm.id,
-      alias: modelForm.alias.trim() || null,
-      contextWindow: Number(modelForm.contextWindow),
-      maxOutput: Number(modelForm.maxOutput),
-      vision: modelForm.vision
+      provider: payload.provider,
+      id: payload.id,
+      alias: payload.alias.trim() || null,
+      contextWindow: Number(payload.contextWindow),
+      maxOutput: Number(payload.maxOutput),
+      vision: payload.vision
     })
     modelEditorOpen.value = false
     await loadModels()
@@ -859,7 +871,7 @@ watch(section, () => { void loadCurrentSection() })
 
           <template v-else-if="section === 'general'">
             <div class="settings-section-heading">
-              <div><h3>常规</h3><p>桌面外观与当前运行时</p></div>
+              <div><h3>常规</h3></div>
             </div>
 
             <section class="settings-group">
@@ -994,32 +1006,14 @@ watch(section, () => { void loadCurrentSection() })
               <div><strong>模型目录</strong><small>{{ filteredModels.length }} / {{ models.length }}</small></div>
               <label class="settings-search"><Search :size="15" /><input v-model="modelQuery" placeholder="搜索模型、别名或标签" /></label>
             </div>
-            <section v-if="modelEditorOpen" class="settings-editor model-editor">
-              <div class="editor-heading">
-                <div><strong>模型能力与上下文</strong><small>{{ modelForm.provider }}/{{ modelForm.id }}</small></div>
-                <button class="icon-button compact" title="关闭" @click="modelEditorOpen = false"><X :size="15" /></button>
-              </div>
-              <div class="form-grid">
-                <label><span>显示别名</span><input v-model="modelForm.alias" placeholder="可选" /></label>
-                <label><span>上下文长度（词元）</span><input v-model.number="modelForm.contextWindow" type="number" min="1024" max="10000000" step="1024" /></label>
-                <label><span>最大输出（词元）</span><input v-model.number="modelForm.maxOutput" type="number" min="128" max="1000000" step="128" /></label>
-                <fieldset class="model-capability-fieldset">
-                  <legend>视觉 / 多模态输入</legend>
-                  <label class="radio-option"><input v-model="modelForm.vision" type="radio" :value="true" name="model-vision" /><span>支持</span></label>
-                  <label class="radio-option"><input v-model="modelForm.vision" type="radio" :value="false" name="model-vision" /><span>不支持</span></label>
-                  <small>声明后，上传图片时会优先使用支持视觉的模型。</small>
-                </fieldset>
-              </div>
-              <small class="model-context-hint">当会话估算词元接近该上下文长度时，运行时会自动压缩较早的历史消息。</small>
-              <div class="editor-actions"><span class="toolbar-spacer" /><button class="secondary-button" @click="modelEditorOpen = false">取消</button><button class="secondary-button primary-action" @click="saveModel"><Save :size="15" /> 保存模型</button></div>
-            </section>
+
             <section class="settings-list model-catalog" aria-label="模型目录">
               <div v-if="filteredModels.length === 0" class="empty-settings">没有匹配的模型</div>
               <div v-for="model in filteredModels" :key="model.ref" class="settings-list-row">
                 <span class="status-dot" :class="{ online: model.providerEnabled }" />
                 <div class="list-main">
                   <div><strong>{{ model.ref }}</strong><span v-if="model.active" class="inline-badge">活动</span><span v-if="model.alias" class="version-text">{{ model.alias }}</span></div>
-                  <small>{{ model.contextWindow.toLocaleString() }} 上下文 · {{ model.maxOutput.toLocaleString() }} 输出 · {{ Object.entries(model.capabilities).filter(([, enabled]) => enabled).map(([name]) => name).join(', ') }}</small>
+                  <small>{{ model.contextWindow.toLocaleString() }} Tokens 上下文 · {{ model.maxOutput.toLocaleString() }} Tokens 输出 · {{ Object.entries(model.capabilities).filter(([, enabled]) => enabled).map(([name]) => name).join(', ') }}</small>
                 </div>
                 <button class="secondary-button compact-button" @click="testModelReference(model.ref)">测试</button>
                 <button class="icon-button compact" title="编辑模型能力与上下文" @click="editModel(model)"><Settings2 :size="15" /></button>
@@ -1094,13 +1088,13 @@ watch(section, () => { void loadCurrentSection() })
 
           <template v-else>
             <div class="settings-section-heading">
-              <div><h3>诊断与用量</h3><p>运行时、模型提供商和模型调用</p></div>
+              <div><h3>诊断与用量</h3></div>
               <button class="secondary-button" @click="loadCurrentSection"><RefreshCw :size="15" /> 重新检查</button>
             </div>
 
             <section class="usage-summary">
               <div><Gauge :size="17" /><span>调用</span><strong>{{ totalUsage.calls.toLocaleString() }}</strong></div>
-              <div><Activity :size="17" /><span>词元</span><strong>{{ totalUsage.tokens.toLocaleString() }}</strong></div>
+              <div><Activity :size="17" /><span>Tokens</span><strong>{{ totalUsage.tokens.toLocaleString() }}</strong></div>
               <div><Bot :size="17" /><span>成本</span><strong>${{ totalUsage.cost.toFixed(4) }}</strong></div>
             </section>
 
@@ -1113,7 +1107,7 @@ watch(section, () => { void loadCurrentSection() })
 
             <section v-if="usage.length > 0" class="usage-table-wrap">
               <table class="usage-table">
-                <thead><tr><th>模型</th><th>调用</th><th>成功率</th><th>缓存命中</th><th>词元</th><th>平均延迟</th><th>成本</th></tr></thead>
+                <thead><tr><th>模型</th><th>调用</th><th>成功率</th><th>缓存命中</th><th>Tokens</th><th>平均延迟</th><th>成本</th></tr></thead>
                 <tbody><tr v-for="item in usage" :key="`${item.provider}/${item.model}`"><td><strong>{{ item.provider }}/{{ item.model }}</strong></td><td>{{ item.calls }}</td><td>{{ Math.round(item.successRate * 100) }}%</td><td><span class="cache-rate">{{ cacheHitRate(item) }}%</span><small v-if="item.cachedInputTokens">命中 {{ item.cachedInputTokens.toLocaleString() }}<template v-if="item.cacheCreationInputTokens"> · 写入 {{ item.cacheCreationInputTokens.toLocaleString() }}</template></small></td><td>{{ (promptInputTokens(item) + item.outputTokens).toLocaleString() }}</td><td>{{ Math.round(item.avgLatencyMs) }} ms</td><td>${{ item.cost.toFixed(4) }}</td></tr></tbody>
               </table>
             </section>
@@ -1146,5 +1140,13 @@ watch(section, () => { void loadCurrentSection() })
     :error="providerEditorOpen ? error : ''"
     @close="providerEditorOpen = false"
     @save="saveProvider"
+  />
+  <ModelEditorDialog
+    :open="modelEditorOpen"
+    :value="modelForm"
+    :saving="action === 'model.update'"
+    :error="modelEditorOpen ? error : ''"
+    @close="modelEditorOpen = false"
+    @save="saveModel"
   />
 </template>

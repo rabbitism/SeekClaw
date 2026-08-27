@@ -82,9 +82,8 @@ onBeforeUnmount(() => document.removeEventListener('keydown', handleKeydown))
         <form class="provider-editor-dialog" role="dialog" aria-modal="true" aria-labelledby="provider-editor-title" @submit.prevent="save">
           <header class="provider-editor-header">
             <div>
-              <span class="provider-editor-eyebrow">模型提供商</span>
               <h2 id="provider-editor-title">{{ editingId ? '编辑模型提供商' : '新增模型提供商' }}</h2>
-              <p>{{ editingId ? `编辑模型提供商 · ${editingId}` : '新增模型提供商 · 配置模型服务的连接和路由信息' }}</p>
+              <p v-if="editingId">{{ editingId }}</p>
             </div>
             <button class="icon-button" type="button" title="关闭" :disabled="saving" @click="close"><X :size="18" /></button>
           </header>
