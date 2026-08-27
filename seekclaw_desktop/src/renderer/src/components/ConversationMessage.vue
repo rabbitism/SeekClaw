@@ -8,8 +8,6 @@ import {
   Image as ImageIcon,
   Layers,
   LoaderCircle,
-  MessageSquarePlus,
-  RefreshCw,
   Wrench
 } from '@lucide/vue'
 import { computed, ref } from 'vue'
@@ -28,8 +26,6 @@ const props = withDefaults(defineProps<{
 
 const emit = defineEmits<{
   openDiff: [filePath: string, diff: string]
-  continue: [message: ChatMessage]
-  regenerate: [message: ChatMessage]
 }>()
 
 const thinkingOpen = ref(false)
@@ -179,18 +175,6 @@ const editStats = computed(() => editedTools.value.reduce((stats, tool) => {
         class="response-placeholder" aria-label="AI 正在思考">
         <span /><span /><span />
       </div>
-
-      <div v-if="message.modelRef && message.state !== 'streaming' && message.state !== 'thinking'"
-        class="assistant-meta">
-        <span class="model-badge">{{ message.modelRef }}</span>
-        <button class="continue-button" type="button" title="继续生成" @click="emit('continue', message)">
-          <MessageSquarePlus :size="13" />继续
-        </button>
-        <button class="continue-button regenerate-button" type="button" title="重新生成这条回答"
-          @click="emit('regenerate', message)">
-          <RefreshCw :size="13" />重新生成
-        </button>
-      </div>
     </div>
   </article>
 
@@ -295,51 +279,5 @@ const editStats = computed(() => editedTools.value.reduce((stats, tool) => {
 
 .thinking-toggle>.lucide-chevron-down.rotated {
   transform: rotate(180deg);
-}
-
-.assistant-meta {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 10px;
-}
-
-.model-badge {
-  padding: 3px 9px;
-  color: var(--text-secondary);
-  font-size: 10.5px;
-  font-weight: 600;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-}
-
-.continue-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 4px 10px;
-  color: var(--accent);
-  font-size: 11.5px;
-  background: var(--accent-soft);
-  border-radius: 999px;
-  opacity: 0;
-  transition: opacity 150ms ease;
-}
-
-.message:hover .continue-button,
-.continue-button:focus-visible {
-  opacity: 1;
-}
-
-.regenerate-button {
-  color: var(--text-secondary);
-  background: var(--surface);
-  border: 1px solid var(--border);
-}
-
-.regenerate-button:hover {
-  color: var(--text);
-  border-color: var(--border-strong);
 }
 </style>

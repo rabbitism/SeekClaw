@@ -1,0 +1,1 @@
+Update the task plan steps and their status. Use this to outline 2-5 concrete, file-specific milestone steps for the current task (e.g. "检查 preview.py 的代码与逻辑", "在 ConversationMessage.vue 中删除节点") and update their status (pending, in_progress, completed) as you progress. Never use vague boilerplate like "分析核心逻辑" or "执行数据处理".

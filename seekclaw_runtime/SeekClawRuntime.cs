@@ -217,6 +217,7 @@ public sealed class SeekClawRuntime : IAsyncDisposable, IDisposable
         var prompts = Prompts;
         foreach (var tool in new ITool[]
                  {
+                     new PlanTool(prompts),
                      new ReadFileTool(prompts),
                      new WriteFileTool(prompts),
                      new EditFileTool(prompts),

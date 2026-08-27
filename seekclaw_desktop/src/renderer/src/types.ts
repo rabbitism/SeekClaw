@@ -127,6 +127,8 @@ export interface ThreadItem {
   phase?: string
   /** Live execution flowchart fed by daemon workflow events. */
   workflow?: WorkflowState
+  /** Custom high-level plan steps emitted explicitly by update_plan. */
+  customPlan?: Array<{ id: string; step: number; title: string; detail?: string; state: 'running' | 'done' | 'error' | 'pending' }>
   /** Assistant placeholder receiving streamed output for the active turn. */
   assistantId?: string
   /** Per-task reasoning depth, independent from other concurrent tasks. */

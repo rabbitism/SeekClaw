@@ -2,21 +2,15 @@
 import {
   Check,
   ChevronDown,
-  ChevronUp,
   Circle,
   ListTodo,
   LoaderCircle,
   X
 } from '@lucide/vue'
 import { computed, ref, watch } from 'vue'
+import type { TaskStep } from '../task-planner'
 
-export interface TaskStep {
-  id: string
-  step: number
-  title: string
-  detail?: string
-  state: 'running' | 'done' | 'error' | 'pending'
-}
+export type { TaskStep }
 
 const props = defineProps<{
   steps: TaskStep[]
@@ -24,13 +18,15 @@ const props = defineProps<{
   phase?: string
 }>()
 
-const collapsed = ref(true)
+// Default to expanded so users can see the plan checklist live as it progresses
+const collapsed = ref(false)
 const dismissed = ref(false)
 
-// Un-dismiss when a new turn starts running while keeping it collapsed by default
+// Un-dismiss and expand when a new turn starts running
 watch(() => props.running, (isRunning) => {
   if (isRunning) {
     dismissed.value = false
+    collapsed.value = false
   }
 })
 
@@ -47,9 +43,9 @@ const summaryText = computed(() => {
     if (runningStep.value) {
       return `正在执行：${runningStep.value.title}`
     }
-    return props.phase ? `正在执行 · ${props.phase}` : '正在执行中…'
+    return props.phase ? `正在执行 · ${props.phase}` : '正在规划与执行…'
   }
-  return `已完成全部 ${props.steps.length} 项主要任务`
+  return `已完成全部 ${props.steps.length} 项任务计划`
 })
 </script>
 
@@ -62,7 +58,7 @@ const summaryText = computed(() => {
             <LoaderCircle v-if="running" :size="16" class="spin accent-spin" />
             <ListTodo v-else :size="16" class="accent-icon" />
           </span>
-          <span class="task-step-title">任务</span>
+          <span class="task-step-title">任务计划</span>
           <span class="task-step-badge" :class="{ 'is-running': running }">
             {{ completedCount }} / {{ steps.length }}
           </span>
@@ -70,10 +66,9 @@ const summaryText = computed(() => {
         </div>
 
         <div class="task-step-header-actions" @click.stop>
-          <button type="button" class="icon-button compact" :title="collapsed ? '展开任务' : '收起任务'"
+          <button type="button" class="icon-button compact" :title="collapsed ? '展开任务计划' : '收起任务计划'"
             @click="collapsed = !collapsed">
-            <ChevronDown v-if="collapsed" :size="14" />
-            <ChevronUp v-else :size="14" />
+            <ChevronDown :size="14" class="task-step-chevron" :class="{ rotated: !collapsed }" />
           </button>
           <button v-if="!running" type="button" class="icon-button compact" title="关闭" @click="dismissed = true">
             <X :size="14" />
@@ -81,39 +76,40 @@ const summaryText = computed(() => {
         </div>
       </header>
 
-      <Transition name="task-step-body">
-        <div v-show="!collapsed" class="task-step-body">
-          <div class="task-step-items">
-            <div v-for="step in steps" :key="step.id" class="task-step-item" :class="`state-${step.state}`">
-              <div class="task-step-status">
-                <LoaderCircle v-if="step.state === 'running'" :size="15" class="spin status-running-icon" />
-                <span v-else-if="step.state === 'done'" class="status-done-icon">
-                  <Check :size="12" />
-                </span>
-                <span v-else-if="step.state === 'error'" class="status-error-icon">
-                  <X :size="12" />
-                </span>
-                <Circle v-else :size="13" class="status-pending-icon" />
-              </div>
-
-              <div class="task-step-content">
-                <div class="task-step-main">
-                  <span class="task-step-name">{{ step.title }}</span>
+      <div class="task-step-accordion" :class="{ 'is-open': !collapsed }">
+        <div class="task-step-accordion-inner">
+          <div class="task-step-body">
+            <div class="task-step-items">
+              <div v-for="step in steps" :key="step.id" class="task-step-item" :class="`state-${step.state}`">
+                <div class="task-step-status">
+                  <LoaderCircle v-if="step.state === 'running'" :size="16" class="spin status-running-icon" />
+                  <span v-else-if="step.state === 'done'" class="status-done-icon">
+                    <Check :size="11" />
+                  </span>
+                  <span v-else-if="step.state === 'error'" class="status-error-icon">
+                    <X :size="11" />
+                  </span>
+                  <Circle v-else :size="15" class="status-pending-icon" />
                 </div>
-                <div v-if="step.detail" class="task-step-detail" :title="step.detail">
-                  {{ step.detail }}
-                </div>
-              </div>
 
-              <div class="task-step-state-tag" :class="`tag-${step.state}`">
-                <span v-if="step.state === 'running'" class="running-dot" />
-                {{ step.state === 'running' ? '进行中' : step.state === 'done' ? '已完成' : step.state === 'error' ? '失败' :
-                '待执行' }}
+                <div class="task-step-content">
+                  <div class="task-step-main">
+                    <span class="task-step-name">{{ step.title }}</span>
+                  </div>
+                  <div v-if="step.detail" class="task-step-detail" :title="step.detail">
+                    {{ step.detail }}
+                  </div>
+                </div>
+
+                <div class="task-step-state-tag" :class="`tag-${step.state}`">
+                  <span v-if="step.state === 'running'" class="running-dot" />
+                  {{ step.state === 'running' ? '进行中' : step.state === 'done' ? '已完成' : step.state === 'error' ? '异常' : '待执行' }}
+                </div>
               </div>
             </div>
           </div>
         </div>
-      </Transition>
+      </div>
     </section>
   </Transition>
 </template>
@@ -204,19 +200,49 @@ const summaryText = computed(() => {
   gap: 4px;
 }
 
-.task-step-body {
-  max-height: 220px;
-  overflow-y: auto;
-  scrollbar-width: thin;
+.task-step-chevron {
+  transition: transform 220ms ease;
+}
+
+.task-step-chevron.rotated {
+  transform: rotate(180deg);
+}
+
+.task-step-accordion {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 240ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.task-step-accordion.is-open {
+  grid-template-rows: 1fr;
+}
+
+.task-step-accordion-inner {
+  overflow: hidden;
   border-top: 1px solid var(--border);
   background: var(--surface);
+  transition: opacity 200ms ease, transform 200ms ease;
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
+.task-step-accordion.is-open .task-step-accordion-inner {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.task-step-body {
+  max-height: 240px;
+  overflow-y: auto;
+  scrollbar-width: thin;
 }
 
 .task-step-items {
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  padding: 6px 10px;
+  gap: 4px;
+  padding: 8px 12px;
 }
 
 .task-step-item {
@@ -233,7 +259,7 @@ const summaryText = computed(() => {
 }
 
 .task-step-item.state-running {
-  background: color-mix(in srgb, var(--accent-soft) 45%, transparent);
+  background: color-mix(in srgb, var(--accent-soft) 40%, transparent);
 }
 
 .task-step-status {
@@ -250,21 +276,23 @@ const summaryText = computed(() => {
 
 .status-done-icon {
   display: grid;
-  width: 18px;
-  height: 18px;
+  width: 19px;
+  height: 19px;
   place-items: center;
   color: var(--accent);
   background: var(--accent-soft);
+  border: 1.5px solid color-mix(in srgb, var(--accent) 60%, transparent);
   border-radius: 50%;
 }
 
 .status-error-icon {
   display: grid;
-  width: 18px;
-  height: 18px;
+  width: 19px;
+  height: 19px;
   place-items: center;
   color: var(--danger);
   background: color-mix(in srgb, var(--danger) 15%, transparent);
+  border: 1.5px solid color-mix(in srgb, var(--danger) 60%, transparent);
   border-radius: 50%;
 }
 
@@ -291,8 +319,8 @@ const summaryText = computed(() => {
 .task-step-name {
   overflow: hidden;
   color: var(--text);
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 13.5px;
+  font-weight: 550;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -341,13 +369,10 @@ const summaryText = computed(() => {
 }
 
 @keyframes step-pulse {
-
-  0%,
-  100% {
+  0%, 100% {
     opacity: 1;
     transform: scale(1);
   }
-
   50% {
     opacity: .3;
     transform: scale(.75);

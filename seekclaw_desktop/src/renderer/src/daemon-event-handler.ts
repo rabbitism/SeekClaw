@@ -230,6 +230,7 @@ export function createDaemonEventHandler(context: DaemonEventContext): (event: D
         const detail = typeof event.details?.detail === 'string' ? event.details.detail : undefined
         if (kind === 'start') {
           thread.workflow = { nodes: [], activeId: null }
+          thread.customPlan = undefined
           thread.turnStepHighWater = 0
         } else if (step > (thread.turnStepHighWater ?? 0)) {
           thread.stats ??= {}
@@ -258,6 +259,27 @@ export function createDaemonEventHandler(context: DaemonEventContext): (event: D
           && message?.content
           && (message.state === 'thinking' || message.state === 'streaming')) {
           message.state = 'done'
+        }
+        break
+      }
+      case 'plan_update': {
+        const rawSteps = event.details?.steps as Array<{ title?: string; status?: string; detail?: string }> | undefined
+        if (Array.isArray(rawSteps) && rawSteps.length > 0) {
+          thread.customPlan = rawSteps.map((s, index) => {
+            const rawStatus = (s.status || '').toLowerCase()
+            const state = (rawStatus === 'completed' || rawStatus === 'done')
+              ? 'done'
+              : (rawStatus === 'in_progress' || rawStatus === 'running')
+                ? 'running'
+                : 'pending'
+            return {
+              id: `plan-step-${index + 1}`,
+              step: index + 1,
+              title: s.title || `步骤 ${index + 1}`,
+              detail: s.detail,
+              state
+            }
+          })
         }
         break
       }

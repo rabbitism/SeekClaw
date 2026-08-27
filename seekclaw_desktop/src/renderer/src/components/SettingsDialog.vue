@@ -1070,11 +1070,13 @@ watch(section, () => { void loadCurrentSection() })
           <template v-else-if="section === 'skills'">
             <div class="settings-section-heading">
               <div><h3>技能</h3><p>{{ skills.filter((skill) => skill.enabled).length }} 已启用</p></div>
-              <button class="secondary-button" :disabled="action === 'skill.import'" @click="importSkills">
-                <LoaderCircle v-if="action === 'skill.import'" class="spin" :size="15" />
-                <Upload v-else :size="15" />导入技能
-              </button>
-              <button class="icon-button" title="刷新" @click="loadCurrentSection"><RefreshCw :size="17" /></button>
+              <div class="row-actions">
+                <button class="icon-button" title="刷新" @click="loadCurrentSection"><RefreshCw :size="17" /></button>
+                <button class="secondary-button" :disabled="action === 'skill.import'" @click="importSkills">
+                  <LoaderCircle v-if="action === 'skill.import'" class="spin" :size="15" />
+                  <Upload v-else :size="15" />导入技能
+                </button>
+              </div>
             </div>
             <section class="settings-list">
               <div v-if="skills.length === 0" class="empty-settings">尚未发现技能，可导入 .md 或 .zip 文件</div>

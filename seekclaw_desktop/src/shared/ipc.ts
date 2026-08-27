@@ -11,6 +11,7 @@ export type DaemonEventName =
   | 'model_start'
   | 'usage'
   | 'workflow'
+  | 'plan_update'
   | 'result'
   | 'done'
   | 'cancelled'

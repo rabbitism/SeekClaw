@@ -1125,6 +1125,14 @@ public sealed class DaemonServer : IAsyncDisposable
                         ["label"] = workflow.Label,
                         ["detail"] = workflow.Detail,
                     }),
+                PlanUpdatedEvent plan => (
+                    Name: (string?)"plan_update",
+                    Data: plan.StepsJson,
+                    Details: new JsonObject
+                    {
+                        ["steps"] = JsonNode.Parse(plan.StepsJson),
+                        ["explanation"] = plan.Explanation,
+                    }),
                 _ => (Name: (string?)null, Data: "", Details: (JsonObject?)null),
             };
             if (payload.Name is not null)

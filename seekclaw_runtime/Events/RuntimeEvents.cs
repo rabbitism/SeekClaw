@@ -67,10 +67,13 @@ public sealed record UsageRecordedEvent(
     long TotalInputTokens,
     long CachedInputTokens) : RuntimeEvent;
 
-// ---------------------------------------------------------------- workflow
+// ---------------------------------------------------------------- workflow & plan
 
 /// <summary>A node in the agent's live execution flowchart (think / tool / verify …).</summary>
 public sealed record WorkflowEvent(int Step, string Kind, string Label, string? Detail = null) : RuntimeEvent;
+
+/// <summary>Emitted when the AI agent creates or updates its task plan steps.</summary>
+public sealed record PlanUpdatedEvent(string StepsJson, string? Explanation = null) : RuntimeEvent;
 
 // ---------------------------------------------------------------- verification
 
