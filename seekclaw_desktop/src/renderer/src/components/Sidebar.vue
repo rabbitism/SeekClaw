@@ -8,6 +8,7 @@ import {
   CircleHelp,
   Folder,
   FolderCog,
+  Info,
   LoaderCircle,
   MoreHorizontal,
   Plus,
@@ -38,6 +39,7 @@ const emit = defineEmits<{
   archiveTask: [thread: ThreadItem]
   restoreTask: [thread: ThreadItem]
   deleteTask: [thread: ThreadItem]
+  openProjectProperties: [project: ProjectItem]
   deleteProject: [project: ProjectItem]
   initializeProjectWorkspace: [project: ProjectItem]
   archiveProjectTasks: [project: ProjectItem]
@@ -300,6 +302,9 @@ onBeforeUnmount(() => {
                 :class="{ 'menu-up': menuPlacement === 'up' }">
                 <button @click="runAction(() => createTask(project.id))">
                   <SquarePen :size="15" />新建任务
+                </button>
+                <button @click="runAction(() => emit('openProjectProperties', project))">
+                  <Info :size="15" />项目属性
                 </button>
                 <button @click="runAction(() => emit('initializeProjectWorkspace', project))">
                   <FolderCog :size="15" />初始化工作区元数据

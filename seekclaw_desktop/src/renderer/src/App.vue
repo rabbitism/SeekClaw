@@ -31,6 +31,7 @@ import ConfirmDialog from './components/ConfirmDialog.vue'
 import ConversationMessage from './components/ConversationMessage.vue'
 import GitWorkspacePanel from './components/GitWorkspacePanel.vue'
 import OfficialSkillsDialog from './components/OfficialSkillsDialog.vue'
+import ProjectPropertiesDialog from './components/ProjectPropertiesDialog.vue'
 import RuntimeReconnectDialog from './components/RuntimeReconnectDialog.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import Sidebar from './components/Sidebar.vue'
@@ -105,6 +106,7 @@ const toolDiff = ref<{ path: string; diff: string } | null>(null)
 const settingsSection = ref<'general' | 'models' | 'mcp' | 'skills' | 'diagnostics'>('general')
 const extensionsSection = ref<'mcp' | 'skills'>('mcp')
 const taskSettingsThreadId = ref('')
+const activePropertiesProject = ref<ProjectItem | null>(null)
 const storedTheme = localStorage.getItem('seekclaw-theme')
 const theme = ref<AppearanceTheme>(
   storedTheme === 'light' || storedTheme === 'dark' || storedTheme === 'system' ? storedTheme : 'system')
@@ -954,6 +956,10 @@ function openTaskSettings(thread: ThreadItem = activeThread.value!): void {
   if (thread) taskSettingsThreadId.value = thread.id
 }
 
+function openProjectProperties(project: ProjectItem): void {
+  activePropertiesProject.value = project
+}
+
 async function saveTaskTitle(title: string): Promise<void> {
   const thread = settingsThread.value
   const project = settingsProject.value
@@ -1138,6 +1144,7 @@ watch(theme, applyTheme)
           @archive-task="archiveTask" @restore-task="restoreTask" @delete-task="deleteTask"
           @delete-project="deleteProject" @archive-project-tasks="archiveProjectTasks"
           @initialize-project-workspace="initializeProjectWorkspace"
+          @open-project-properties="openProjectProperties"
           @delete-project-tasks="deleteProjectTasks" @archive-global-tasks="archiveGlobalTasks"
           @delete-global-tasks="deleteGlobalTasks" @open-archived="openArchivedTasks"
           @open-scheduled-tasks="openScheduledTasks" @open-extensions="openExtensions('mcp')"
@@ -1323,6 +1330,11 @@ watch(theme, applyTheme)
       @close="taskSettingsThreadId = ''" @save-title="saveTaskTitle"
       @archive="settingsThread && archiveTask(settingsThread)" @restore="settingsThread && restoreTask(settingsThread)"
       @delete="settingsThread && deleteTask(settingsThread)" />
+
+    <ProjectPropertiesDialog :open="Boolean(activePropertiesProject)" :project="activePropertiesProject ?? undefined"
+      :threads="threads" @close="activePropertiesProject = null"
+      @initialize-workspace="initializeProjectWorkspace"
+      @open-extensions="openExtensions" />
 
     <RuntimeReconnectDialog :open="Boolean(reconnectPrompt)" :startup="reconnectPrompt?.startup ?? false"
       :endpoint="daemonState.endpoint" :error="reconnectPrompt?.error" @retry="continueRuntimeReconnect"
