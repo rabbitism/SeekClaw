@@ -58,13 +58,13 @@ public sealed class HealthChecker(ILlmHttpFactory httpFactory, Configuration.ICo
             {
                 ["model"] = modelName,
                 ["max_tokens"] = 1,
-                ["messages"] = new JsonArray { new JsonObject { ["role"] = "user", ["content"] = "ping" } }
+                ["messages"] = new JsonArray { (JsonNode)new JsonObject { ["role"] = "user", ["content"] = "ping" } }
             }
             : new JsonObject
             {
                 ["model"] = modelName,
                 ["max_tokens"] = 1,
-                ["messages"] = new JsonArray { new JsonObject { ["role"] = "user", ["content"] = "ping" } },
+                ["messages"] = new JsonArray { (JsonNode)new JsonObject { ["role"] = "user", ["content"] = "ping" } },
                 ["stream"] = false
             };
 

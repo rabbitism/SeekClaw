@@ -1240,7 +1240,7 @@ def main() -> int:
         with console.status("[bold blue]正在重置与清理构建目录...[/bold blue]", spinner="dots"):
             for meta in build_meta.values():
                 reset_directory(Path(meta["runtime_stage"]))
-            PUBLISH_DIR.mkdir(parents=True, exist_ok=True)
+            reset_directory(PUBLISH_DIR)
             remove_directory(BUILDER_OUTPUT)
         console.print("[bold green]✓[/bold green] 构建目录准备完成")
 
@@ -1316,8 +1316,8 @@ def main() -> int:
 
             if cur_platform == PLATFORM_WINDOWS:
                 portable_output = PUBLISH_DIR / "SeekClaw-win-x64"
-                portable_zip_output = PUBLISH_DIR / "SeekClaw-portable-win-x64.zip"
-                installer_output = PUBLISH_DIR / "SeekClaw-Setup-win-x64.exe"
+                portable_zip_output = PUBLISH_DIR / f"SeekClaw-portable-{release_version}-win-x64.zip"
+                installer_output = PUBLISH_DIR / f"SeekClaw-Setup-{release_version}-win-x64.exe"
 
                 if cur_target in (TARGET_PORTABLE, TARGET_BOTH):
                     if not unpacked_output.is_dir():
@@ -1361,7 +1361,7 @@ def main() -> int:
                     raise BuildError(f"Bundled Linux Runtime executable is missing: {runtime_executable}")
 
                 portable_output = PUBLISH_DIR / "SeekClaw-linux-x64"
-                portable_tar_output = PUBLISH_DIR / "SeekClaw-portable-linux-x64.tar.gz"
+                portable_tar_output = PUBLISH_DIR / f"SeekClaw-portable-{release_version}-linux-x64.tar.gz"
                 deb_output = PUBLISH_DIR / f"SeekClaw-{release_version}_amd64.deb"
                 rpm_output = PUBLISH_DIR / f"SeekClaw-{release_version}.x86_64.rpm"
 

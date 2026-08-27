@@ -31,7 +31,7 @@ public sealed class PlanTool(IPromptProvider prompts) : BuiltinTool(prompts)
                         ["status"] = new JsonObject
                         {
                             ["type"] = "string",
-                            ["enum"] = new JsonArray { "pending", "in_progress", "completed" },
+                            ["enum"] = new JsonArray { (JsonNode)JsonValue.Create("pending")!, (JsonNode)JsonValue.Create("in_progress")!, (JsonNode)JsonValue.Create("completed")! },
                             ["description"] = "Current status of this step"
                         },
                         ["detail"] = new JsonObject
@@ -40,7 +40,7 @@ public sealed class PlanTool(IPromptProvider prompts) : BuiltinTool(prompts)
                             ["description"] = "Optional short detail/progress note for this step"
                         }
                     },
-                    ["required"] = new JsonArray { "title", "status" }
+                    ["required"] = new JsonArray { (JsonNode)JsonValue.Create("title")!, (JsonNode)JsonValue.Create("status")! }
                 }
             },
             ["explanation"] = new JsonObject
@@ -49,7 +49,7 @@ public sealed class PlanTool(IPromptProvider prompts) : BuiltinTool(prompts)
                 ["description"] = "Optional brief explanation of why the plan was updated"
             }
         },
-        ["required"] = new JsonArray { "steps" }
+        ["required"] = new JsonArray { (JsonNode)JsonValue.Create("steps")! }
     };
 
     public override Task<ToolResult> ExecuteAsync(JsonObject arguments, ToolContext context, CancellationToken ct)

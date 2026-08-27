@@ -106,16 +106,16 @@ public sealed class DaemonServerTests : IAsyncDisposable
             ["cron"] = "0 9 * * *",
             ["workspace"] = _tempDir,
         });
-        var created = ParseData(await connection.ReadAsync());
+        var created = ParseData(await connection.ReadUntilAsync(item => item["id"]?.GetValue<long>() == 1));
         var id = created["id"]!.GetValue<string>();
         Assert.False(string.IsNullOrWhiteSpace(id));
 
         await connection.SendAsync(2, "schedule.toggle", new JsonObject { ["id"] = id, ["enabled"] = false });
-        var toggled = ParseData(await connection.ReadAsync());
+        var toggled = ParseData(await connection.ReadUntilAsync(item => item["id"]?.GetValue<long>() == 2));
         Assert.False(toggled["enabled"]!.GetValue<bool>());
 
         await connection.SendAsync(3, "schedule.run", new JsonObject { ["id"] = id });
-        var run = await connection.ReadAsync();
+        var run = await connection.ReadUntilAsync(item => item["id"]?.GetValue<long>() == 3);
         Assert.Equal("result", run["event"]!.GetValue<string>());
 
         // schedule.run acknowledges immediately and executes in the background;
@@ -140,12 +140,12 @@ public sealed class DaemonServerTests : IAsyncDisposable
             ["prompt"] = "x",
             ["cron"] = "not a cron",
         });
-        var invalid = await connection.ReadAsync();
+        var invalid = await connection.ReadUntilAsync(item => item["id"]?.GetValue<long>() == 5);
         Assert.Equal("error", invalid["event"]!.GetValue<string>());
         Assert.Contains("cron", invalid["data"]!.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
 
         await connection.SendAsync(6, "schedule.delete", new JsonObject { ["id"] = id });
-        var deleted = await connection.ReadAsync();
+        var deleted = await connection.ReadUntilAsync(item => item["id"]?.GetValue<long>() == 6);
         Assert.Equal("result", deleted["event"]!.GetValue<string>());
     }
 
@@ -179,11 +179,11 @@ public sealed class DaemonServerTests : IAsyncDisposable
             ["cron"] = "0 9 * * *",
             ["workspace"] = _tempDir,
         });
-        var created = ParseData(await connection.ReadAsync());
+        var created = ParseData(await connection.ReadUntilAsync(item => item["id"]?.GetValue<long>() == 1));
         var id = created["id"]!.GetValue<string>();
 
         await connection.SendAsync(2, "schedule.run", new JsonObject { ["id"] = id });
-        var run = await connection.ReadAsync();
+        var run = await connection.ReadUntilAsync(item => item["id"]?.GetValue<long>() == 2);
         Assert.Equal("result", run["event"]!.GetValue<string>());
 
         var updated = await connection.ReadUntilAsync(item =>
