@@ -162,6 +162,11 @@ async function toggleSkill(skill: SkillInfo): Promise<void> {
     error.value = err instanceof Error ? err.message : String(err)
   }
 }
+
+function navigateToExtensions(tab: 'mcp' | 'skills'): void {
+  emit('close')
+  emit('openExtensions', tab)
+}
 </script>
 
 <template>
@@ -305,7 +310,7 @@ async function toggleSkill(skill: SkillInfo): Promise<void> {
                 <h3 class="tab-section-title">项目专属 MCP 服务</h3>
                 <p class="tab-section-desc">仅对当前项目生效的 Model Context Protocol 扩展（由 <code>mcp/servers.json</code> 或项目配置提供）。</p>
               </div>
-              <button type="button" class="secondary-button compact" @click="emit('openExtensions', 'mcp')">
+              <button type="button" class="secondary-button compact" @click="navigateToExtensions('mcp')">
                 <ExternalLink :size="13" /> 打开 MCP 管理
               </button>
             </div>
@@ -314,7 +319,7 @@ async function toggleSkill(skill: SkillInfo): Promise<void> {
               <Blocks :size="32" class="empty-icon" />
               <h4>暂无项目专属 MCP 服务</h4>
               <p>可在项目根目录创建 <code>mcp/servers.json</code> 或 <code>.seekclaw/config.json</code> 定义项目专用的 MCP 扩展。</p>
-              <button type="button" class="secondary-button" @click="emit('openExtensions', 'mcp')">
+              <button type="button" class="secondary-button" @click="navigateToExtensions('mcp')">
                 配置 MCP 服务
               </button>
             </div>
@@ -361,7 +366,7 @@ async function toggleSkill(skill: SkillInfo): Promise<void> {
                 <h3 class="tab-section-title">项目专属技能</h3>
                 <p class="tab-section-desc">仅对当前项目生效的提示词技能（位于 <code>&lt;project&gt;/skills/</code> 或 <code>.seekclaw/skills/</code> 目录下）。</p>
               </div>
-              <button type="button" class="secondary-button compact" @click="emit('openExtensions', 'skills')">
+              <button type="button" class="secondary-button compact" @click="navigateToExtensions('skills')">
                 <ExternalLink :size="13" /> 打开技能管理
               </button>
             </div>
@@ -370,7 +375,7 @@ async function toggleSkill(skill: SkillInfo): Promise<void> {
               <Wrench :size="32" class="empty-icon" />
               <h4>暂无项目专属技能</h4>
               <p>可在项目根目录创建 <code>skills/&lt;技能名&gt;/prompt.txt</code> 来为当前项目注入专属指令与知识库。</p>
-              <button type="button" class="secondary-button" @click="emit('openExtensions', 'skills')">
+              <button type="button" class="secondary-button" @click="navigateToExtensions('skills')">
                 管理全部技能
               </button>
             </div>

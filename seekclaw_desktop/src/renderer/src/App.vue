@@ -519,24 +519,34 @@ async function openWorkspace(): Promise<void> {
 }
 
 function openSettings(section: typeof settingsSection.value = 'general'): void {
+  activePropertiesProject.value = null
+  taskSettingsThreadId.value = ''
   settingsSection.value = section
   activePage.value = 'settings'
 }
 
 function openExtensions(section: 'mcp' | 'skills' = 'mcp'): void {
+  activePropertiesProject.value = null
+  taskSettingsThreadId.value = ''
   extensionsSection.value = section
   activePage.value = 'extensions'
 }
 
 function openArchivedTasks(): void {
+  activePropertiesProject.value = null
+  taskSettingsThreadId.value = ''
   activePage.value = 'archived'
 }
 
 function openScheduledTasks(): void {
+  activePropertiesProject.value = null
+  taskSettingsThreadId.value = ''
   activePage.value = 'scheduled'
 }
 
 function openOfficialSkills(): void {
+  activePropertiesProject.value = null
+  taskSettingsThreadId.value = ''
   activePage.value = 'official-skills'
 }
 
