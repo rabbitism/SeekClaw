@@ -167,8 +167,13 @@ public sealed class McpClient(string serverName, IMcpTransport transport) : IAsy
                 if (idNode is null) continue; // notification from server — ignored
 
                 long id;
-                try { id = idNode.GetValue<long>(); }
-                catch (InvalidOperationException) { continue; }
+                if (idNode is JsonValue val)
+                {
+                    if (val.TryGetValue<long>(out var num)) id = num;
+                    else if (val.TryGetValue<string>(out var str) && long.TryParse(str, out var parsed)) id = parsed;
+                    else continue;
+                }
+                else continue;
 
                 if (!_pending.TryRemove(id, out var tcs)) continue;
 

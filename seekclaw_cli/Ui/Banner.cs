@@ -1,5 +1,4 @@
 using System.Text;
-
 namespace SeekClaw.Cli.Ui;
 
 /// <summary>
@@ -8,7 +7,7 @@ namespace SeekClaw.Cli.Ui;
 /// </summary>
 public static class Banner
 {
-    public const string Version = "1.1.0";
+    public const string Version = "1.2.0";
 
     // SeekClaw Cyber Cyan to Violet gradient colors
     private static readonly (int R, int G, int B) Cyan = (34, 211, 238);
@@ -24,9 +23,9 @@ public static class Banner
         "╚══════╝╚══════╝╚══════╝╚═╝  ╚═╝ ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝ ",
     ];
 
-    public sealed record Info (string Model, string Workspace, string ProjectKinds, string Session, bool Resumed);
+    public sealed record Info(string Model, string Workspace, string ProjectKinds, string Session, bool Resumed);
 
-    public static IReadOnlyList<string> Build (Info info)
+    public static IReadOnlyList<string> Build(Info info)
     {
         var width = SafeWidth();
         var lines = new List<string> { "" };
@@ -34,7 +33,7 @@ public static class Banner
         return lines;
     }
 
-    private static IEnumerable<string> BuildPanel (Info info, int width)
+    private static IEnumerable<string> BuildPanel(Info info, int width)
     {
         var logoWidth = Logo[0].Length;
         var totalWidth = Math.Clamp(Math.Max(width - 2, logoWidth + 6), 76, 110);
@@ -118,14 +117,14 @@ public static class Banner
 
         return output;
 
-        static string Row (string label, string value) =>
+        static string Row(string label, string value) =>
             label.PadRight(10).Style(Ansi.Gray) + " " + value;
 
-        static string CmdRow (string cmd, string desc) =>
+        static string CmdRow(string cmd, string desc) =>
             cmd.PadRight(8).Style(Ansi.Rgb(Cyan.R, Cyan.G, Cyan.B) + Ansi.Bold) + " " + desc.Style(Ansi.Gray);
     }
 
-    private static string GradientRow (string text, int row, int totalRows)
+    private static string GradientRow(string text, int row, int totalRows)
     {
         var sb = new StringBuilder(text.Length * 12);
         var columns = Math.Max(1, text.Length - 1);
@@ -144,9 +143,9 @@ public static class Banner
         return sb.ToString();
     }
 
-    private static int Lerp (int from, int to, double t) => (int)Math.Round(from + (to - from) * t);
+    private static int Lerp(int from, int to, double t) => (int)Math.Round(from + (to - from) * t);
 
-    private static string CenterText (string text, int targetWidth)
+    private static string CenterText(string text, int targetWidth)
     {
         var vis = VisibleWidth(text);
         if (vis >= targetWidth) return text;
@@ -154,15 +153,15 @@ public static class Banner
         return new string(' ', left) + text;
     }
 
-    private static string ShortenPath (string path, int maxLen)
+    private static string ShortenPath(string path, int maxLen)
     {
         if (path.Length <= maxLen) return path;
         return "…" + path[^(maxLen - 1)..];
     }
 
-    private static int VisibleWidth (string text) => TextWidth.Of(Ansi.StripStyles(text));
+    private static int VisibleWidth(string text) => TextWidth.Of(Ansi.StripStyles(text));
 
-    private static string ClipToWidth (string text, int maxWidth)
+    private static string ClipToWidth(string text, int maxWidth)
     {
         if (VisibleWidth(text) <= maxWidth) return text;
 
@@ -190,7 +189,7 @@ public static class Banner
         return sb.Append(Ansi.Reset).Append('…').ToString();
     }
 
-    private static int SafeWidth ()
+    private static int SafeWidth()
     {
         try { return Math.Max(70, Console.WindowWidth); }
         catch (IOException) { return 90; }

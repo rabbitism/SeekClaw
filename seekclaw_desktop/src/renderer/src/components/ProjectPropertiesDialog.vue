@@ -24,7 +24,7 @@ import type { ProjectItem, ThreadItem } from '../types'
 interface McpServerInfo {
   name: string
   scope: 'workspace' | 'global'
-  transport: 'stdio' | 'sse'
+  transport: 'stdio' | 'sse' | 'http' | string
   command?: string
   args: string[]
   url?: string

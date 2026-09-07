@@ -194,7 +194,7 @@ const profileForm = reactive({
   name: '', provider: '', model: '', strategy: 'balanced', temperature: ''
 })
 const mcpForm = reactive({
-  name: '', scope: 'workspace' as 'workspace' | 'global', transport: 'stdio' as 'stdio' | 'sse',
+  name: '', scope: 'workspace' as 'workspace' | 'global', transport: 'stdio' as 'stdio' | 'sse' | 'http',
   command: '', args: '', url: '', env: '', enabled: true
 })
 
@@ -240,7 +240,8 @@ const mcpScopeOptions = [
 ]
 const mcpTransportOptions = [
   { value: 'stdio', label: 'stdio', description: '通过本地子进程通信' },
-  { value: 'sse', label: 'SSE', description: '连接远程 HTTP 服务' }
+  { value: 'sse', label: 'SSE', description: '连接远程 SSE 服务' },
+  { value: 'http', label: 'HTTP', description: '连接 Streamable HTTP / HTTP 服务' }
 ]
 const filteredModels = computed(() => {
   const query = modelQuery.value.trim().toLocaleLowerCase()
@@ -588,7 +589,7 @@ function updateMcpScope(value: string): void {
 }
 
 function updateMcpTransport(value: string): void {
-  if (value === 'stdio' || value === 'sse') mcpForm.transport = value
+  if (value === 'stdio' || value === 'sse' || value === 'http') mcpForm.transport = value
 }
 
 async function useProvider(provider: ProviderInfo): Promise<void> {

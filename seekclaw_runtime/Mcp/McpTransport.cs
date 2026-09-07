@@ -103,72 +103,211 @@ public sealed class StdioMcpTransport(string command, IReadOnlyList<string>? arg
 }
 
 /// <summary>
-/// SSE transport: GET an event stream; the server announces a POST endpoint via an
-/// "endpoint" event, then JSON-RPC responses arrive as "message" events.
-/// (HTTP and WebSocket transports are reserved for future versions.)
+/// HTTP / SSE transport: supports both Streamable HTTP (MCP 2024-11/2025 specification)
+/// where JSON-RPC requests are sent via POST and the response is streamed or returned as JSON,
+/// and legacy SSE transport where a long-lived GET stream receives responses.
 /// </summary>
-public sealed class SseMcpTransport(string url) : IMcpTransport
+public class HttpMcpTransport : IMcpTransport
 {
+    private readonly string _url;
+    private readonly HttpClient _http;
+    private readonly bool _ownsHttpClient;
     private readonly Channel<JsonObject> _incoming = Channel.CreateUnbounded<JsonObject>();
-    private readonly HttpClient _http = new() { Timeout = Timeout.InfiniteTimeSpan };
     private readonly TaskCompletionSource<string> _endpoint = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly CancellationTokenSource _lifetime = new();
+    private string? _sessionId;
     private Task? _readLoop;
+
+    public HttpMcpTransport(string url, HttpClient? httpClient = null)
+    {
+        _url = url;
+        _http = httpClient ?? new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
+        _ownsHttpClient = httpClient is null;
+    }
 
     public ChannelReader<JsonObject> Incoming => _incoming.Reader;
 
-    public async Task StartAsync(CancellationToken ct)
+    public virtual async Task StartAsync(CancellationToken ct)
     {
-        var request = new HttpRequestMessage(HttpMethod.Get, url);
-        request.Headers.TryAddWithoutValidation("Accept", "text/event-stream");
-        var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
-        var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, _lifetime.Token);
+        var token = linkedCts.Token;
 
-        _readLoop = Task.Run(async () =>
+        try
         {
-            try
+            var request = new HttpRequestMessage(HttpMethod.Get, _url);
+            request.Headers.TryAddWithoutValidation("Accept", "text/event-stream, application/json");
+            var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
+
+            CaptureSessionId(response);
+
+            if (response.IsSuccessStatusCode)
             {
-                await foreach (var sse in Providers.SseReader.ReadAsync(stream, _lifetime.Token).ConfigureAwait(false))
+                var mediaType = response.Content.Headers.ContentType?.MediaType?.ToLowerInvariant() ?? "";
+                if (mediaType.Contains("event-stream"))
                 {
-                    if (sse.Event == "endpoint")
-                    {
-                        _endpoint.TrySetResult(new Uri(new Uri(url), sse.Data).ToString());
-                    }
-                    else
+                    // Server returned an SSE stream.
+                    var stream = await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
+                    _readLoop = Task.Run(async () =>
                     {
                         try
                         {
-                            if (JsonNode.Parse(sse.Data) is JsonObject obj)
-                                _incoming.Writer.TryWrite(obj);
+                            await foreach (var sse in Providers.SseReader.ReadAsync(stream, _lifetime.Token).ConfigureAwait(false))
+                            {
+                                if (sse.Event == "endpoint")
+                                {
+                                    _endpoint.TrySetResult(new Uri(new Uri(_url), sse.Data).ToString());
+                                }
+                                else
+                                {
+                                    DispatchSseData(sse.Data);
+                                }
+                            }
                         }
-                        catch (System.Text.Json.JsonException) { }
+                        catch (Exception ex) when (ex is IOException or HttpRequestException or OperationCanceledException) { }
+                        // NOTE: Do not complete _incoming here because Streamable HTTP servers may finish GET immediately.
+                    }, CancellationToken.None);
+
+                    // Wait briefly for endpoint announcement if server announces endpoint via legacy SSE event.
+                    var completed = await Task.WhenAny(_endpoint.Task, Task.Delay(3000, token)).ConfigureAwait(false);
+                    if (completed != _endpoint.Task) _endpoint.TrySetResult(_url);
+                    return;
+                }
+                else if (mediaType.Contains("json"))
+                {
+                    // Some servers return a JSON greeting with endpoint metadata (e.g. {"endpoint": "POST /mcp"})
+                    var body = await response.Content.ReadAsStringAsync(token).ConfigureAwait(false);
+                    try
+                    {
+                        if (JsonNode.Parse(body) is JsonObject json)
+                        {
+                            if (json["endpoint"]?.GetValue<string>() is { } epStr)
+                            {
+                                var resolvedEndpoint = epStr.StartsWith("POST ", StringComparison.OrdinalIgnoreCase)
+                                    ? epStr[5..].Trim()
+                                    : epStr.Trim();
+                                _endpoint.TrySetResult(new Uri(new Uri(_url), resolvedEndpoint).ToString());
+                            }
+                        }
                     }
+                    catch { }
                 }
             }
-            catch (Exception ex) when (ex is IOException or HttpRequestException or OperationCanceledException) { }
-            finally { _incoming.Writer.TryComplete(); }
-        }, CancellationToken.None);
+        }
+        catch (Exception)
+        {
+            // Server might only accept POST /mcp and reject GET with 405/400.
+            // Fall back directly to POSTing to _url.
+        }
 
-        // Wait briefly for the endpoint announcement; some servers accept POST to the same URL.
-        var completed = await Task.WhenAny(_endpoint.Task, Task.Delay(5000, ct)).ConfigureAwait(false);
-        if (completed != _endpoint.Task) _endpoint.TrySetResult(url);
+        _endpoint.TrySetResult(_url);
     }
 
-    public async Task SendAsync(JsonObject message, CancellationToken ct)
+    public virtual async Task SendAsync(JsonObject message, CancellationToken ct)
     {
-        var endpoint = await _endpoint.Task.WaitAsync(ct).ConfigureAwait(false);
-        using var content = new StringContent(message.ToJsonString(), Encoding.UTF8, "application/json");
-        using var response = await _http.PostAsync(endpoint, content, ct).ConfigureAwait(false);
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, _lifetime.Token);
+        var token = linkedCts.Token;
+
+        var endpoint = await _endpoint.Task.WaitAsync(token).ConfigureAwait(false);
+        using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
+        {
+            Content = new StringContent(message.ToJsonString(), Encoding.UTF8, "application/json")
+        };
+        request.Headers.TryAddWithoutValidation("Accept", "application/json, text/event-stream");
+        if (!string.IsNullOrWhiteSpace(_sessionId))
+        {
+            request.Headers.TryAddWithoutValidation("Mcp-Session-Id", _sessionId);
+        }
+
+        using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
+
+        CaptureSessionId(response);
+
+        var mediaType = response.Content.Headers.ContentType?.MediaType?.ToLowerInvariant() ?? "";
+        if (mediaType.Contains("event-stream"))
+        {
+            // Streamable HTTP: response is an SSE stream (e.g. StarLife, MCP 2024-11/2025 spec)
+            var stream = await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
+            await foreach (var sse in Providers.SseReader.ReadAsync(stream, token).ConfigureAwait(false))
+            {
+                if (sse.Event == "endpoint")
+                {
+                    _endpoint.TrySetResult(new Uri(new Uri(_url), sse.Data).ToString());
+                }
+                else
+                {
+                    DispatchSseData(sse.Data);
+                }
+            }
+        }
+        else if (mediaType.Contains("json"))
+        {
+            // Direct HTTP POST: response is a JSON-RPC message
+            var body = await response.Content.ReadAsStringAsync(token).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(body))
+            {
+                DispatchJson(body);
+            }
+        }
     }
 
-    public ValueTask DisposeAsync()
+    private void CaptureSessionId(HttpResponseMessage response)
     {
-        _lifetime.Cancel();
+        if (response.Headers.TryGetValues("Mcp-Session-Id", out var values))
+        {
+            var id = values.FirstOrDefault();
+            if (!string.IsNullOrWhiteSpace(id)) _sessionId = id;
+        }
+    }
+
+    private void DispatchSseData(string data)
+    {
+        if (string.IsNullOrWhiteSpace(data)) return;
+        DispatchJson(data);
+    }
+
+    private void DispatchJson(string text)
+    {
+        try
+        {
+            var node = JsonNode.Parse(text);
+            if (node is JsonObject obj)
+            {
+                _incoming.Writer.TryWrite(obj);
+            }
+            else if (node is JsonArray arr)
+            {
+                foreach (var item in arr)
+                {
+                    if (item is JsonObject itemObj)
+                        _incoming.Writer.TryWrite(itemObj);
+                }
+            }
+        }
+        catch (System.Text.Json.JsonException) { }
+    }
+
+    private int _disposed;
+
+    public virtual async ValueTask DisposeAsync()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+
+        try { _lifetime.Cancel(); } catch (ObjectDisposedException) { }
         _incoming.Writer.TryComplete();
-        _http.Dispose();
+        if (_readLoop is not null)
+        {
+            try { await _readLoop.ConfigureAwait(false); } catch { }
+        }
+        if (_ownsHttpClient)
+        {
+            _http.Dispose();
+        }
         _lifetime.Dispose();
-        return ValueTask.CompletedTask;
     }
 }
+
+/// <summary>
+/// Backwards-compatible SSE transport alias for HttpMcpTransport.
+/// </summary>
+public sealed class SseMcpTransport(string url) : HttpMcpTransport(url);

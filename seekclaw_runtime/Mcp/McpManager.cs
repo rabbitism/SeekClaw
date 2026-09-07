@@ -107,9 +107,9 @@ public sealed class McpManager(
         {
             "stdio" when !string.IsNullOrWhiteSpace(server.Command) =>
                 new StdioMcpTransport(server.Command!, server.Args, server.Env),
-            "sse" when !string.IsNullOrWhiteSpace(server.Url) =>
-                new SseMcpTransport(server.Url!),
-            "http" or "websocket" =>
+            "sse" or "http" or "streamable-http" or "streamable_http" when !string.IsNullOrWhiteSpace(server.Url) =>
+                new HttpMcpTransport(server.Url!),
+            "websocket" =>
                 throw new McpException($"Transport '{server.Transport}' is reserved but not implemented yet."),
             _ => throw new McpException($"Server '{name}': invalid transport/command/url combination."),
         };

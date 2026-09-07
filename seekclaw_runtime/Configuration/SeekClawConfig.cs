@@ -175,7 +175,7 @@ public sealed class McpConfig
 
 public sealed class McpServerConfig
 {
-    /// <summary>stdio | sse (http / websocket reserved).</summary>
+    /// <summary>stdio | sse | http | streamable-http (websocket reserved).</summary>
     public string Transport { get; set; } = "stdio";
     public string? Command { get; set; }
     public List<string>? Args { get; set; }
